@@ -38,8 +38,11 @@ typedef struct {
     uint8_t follow;                      /* FOLLOW_* */
     uint8_t press;                       /* PRESS_* */
     uint8_t pamt;                        /* 0 .. 100 */
+    uint8_t glide_l, mode_l;             /* GLIDE (0.3): the low split's time 0..100 and GM_* */
+    uint8_t glide_h, mode_h;             /* and the right hand's (the whole keyboard with the split off) */
     uint8_t rsv;
 } settings_t;
+#define SET_SIZE_02 48u                  /* 0.2's record: without GLIDE */
 static settings_t set;
 static uint8_t set_dirty;
 static uint32_t dirty_at;
@@ -71,6 +74,10 @@ static const scale_t SCALES[] = {
 };
 #define NSCALE (sizeof SCALES / sizeof SCALES[0])
 enum { FOLLOW_OFF, FOLLOW_SNAP, FOLLOW_WHITE, NFOLLOW };
+/* GLIDE's modes: POLY every note its own voice, gliding from the last note of its side; MONO one voice a side, a new
+ * key slides it there (no new attack while one sounds), always gliding; LEGATO as MONO, but gliding only legato */
+enum { GM_POLY, GM_MONO, GM_LEGATO, NGMODE };
+static const char *const GMODE_NAME[NGMODE] = {"POLY", "MONO", "LEGATO"};
 static const char *const FOLLOW_NAME[NFOLLOW] = {"OFF", "SNAP", "WHITE"};
 static const char *const PRESS_NAME[NPRESS] = {"OFF", "FILTER", "SWELL", "POWER", "VIBRATO"};
 static const char *const NOTE_NAME[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
@@ -87,6 +94,13 @@ static void settings_v2(void)            /* the parts 0.2 added, as they start *
     set.rsv = 0;
 }
 
+static void settings_v3(void)            /* GLIDE, as it starts: off, every note its own voice */
+{
+    set.glide_l = set.glide_h = 0;
+    set.mode_l = set.mode_h = 0;
+    set.rsv = 0;
+}
+
 static void settings_defaults(void)
 {
     uint32_t i, k;
@@ -97,6 +111,7 @@ static void settings_defaults(void)
             set.m[i][k] = PRESETS[i].m[k];
     set.vib = 30;
     settings_v2();
+    settings_v3();
 }
 
 static int settings_ok(void)
@@ -109,12 +124,15 @@ static int settings_ok(void)
     return set.magic == SET_MAGIC && set.preset < NPRESETS && set.tone >= -50 && set.tone <= 50 && set.vib <= 100u &&
            set.octave >= -2 && set.octave <= 1 && set.epic <= 1u && set.split_oct <= 3u && set.split_key >= 1u &&
            set.split_key < NKEYS && set.scale < NSCALE && set.follow < NFOLLOW && set.press < NPRESS &&
-           set.pamt <= 100u;
+           set.pamt <= 100u && set.glide_l <= 100u && set.glide_h <= 100u && set.mode_l < NGMODE && set.mode_h < NGMODE;
 }
 
 static void settings_load(void)
 {
-    if (plat_store_load(OBJ_SETTINGS, &set, sizeof set) != (int)sizeof set)
+    int r = plat_store_load(OBJ_SETTINGS, &set, sizeof set);
+    if (r == (int)SET_SIZE_02)
+        settings_v3();                   /* 0.2's record: GLIDE added */
+    else if (r != (int)sizeof set)
         settings_defaults();
     if (set.magic == SET_MAGIC && set.split_key == 0u)
         settings_v2();                   /* 0.1's record: its presets kept */
@@ -209,7 +227,7 @@ static void knobs_from_settings(void)
 }
 
 /* ---------------------------------------------------------------------- UI --- */
-enum { PG_MAIN, PG_SPLIT, PG_PRESS, NPAGE };
+enum { PG_MAIN, PG_SPLIT, PG_PRESS, PG_GLIDE, NPAGE };
 enum { SIDE_L, SIDE_R };
 static struct {
     char msg[2][24];
@@ -234,6 +252,11 @@ static struct {
     uint32_t intro_t0;
     uint32_t scene_at;
     uint8_t win[NKEYS];                  /* each key's light 0..255 (the film's lights follow them) */
+    uint8_t mono[2];                     /* MONO / LEGATO: the key whose note sounds on that side, + 1 (0: none) */
+    float last_p[2];                     /* the last pitch played on each side (where a glide starts) */
+    uint8_t has_last[2];
+    uint8_t kvel[NKEYS];
+    uint32_t ptime[NKEYS], pcount;       /* the order the keys went down (MONO goes back to the last one held) */
     uint32_t rnd;
 } ui;
 
@@ -378,27 +401,67 @@ static int key_pitch(uint32_t k, float *p)
     return 1;
 }
 
+static int gmode(int side) { return side == SIDE_L ? set.mode_l : set.mode_h; }
+static float gl_secs(uint32_t v) { return (float)(v * v) * (3.0f / 10000.0f); }   /* 0..100: 0..3 s, fine at the start */
+static float gtime(int side) { return gl_secs(side == SIDE_L ? set.glide_l : set.glide_h); }
+
+/* a key's notes (the root, and with EPIC the fifth and the octave) */
+static void notes_on(uint32_t k, float p, float v, float from, float g)
+{
+    static const float IV[3] = {0.0f, 7.0f, 12.0f}, VS[3] = {1.0f, 0.85f, 0.8f};
+    uint32_t i, n = set.epic ? 3u : 1u;
+    for (i = 0; i < n; i++) {
+        if (from != p)
+            eng_note_glide((int)(k + 100u * i), p + IV[i], v * VS[i], from + IV[i], g);
+        else
+            eng_note_on((int)(k + 100u * i), p + IV[i], v * VS[i]);
+    }
+}
+static void notes_move(uint32_t m, uint32_t k, float p, float v, float g)
+{
+    static const float IV[3] = {0.0f, 7.0f, 12.0f};
+    uint32_t i, n = set.epic ? 3u : 1u;
+    for (i = 0; i < n; i++)
+        eng_note_move((int)(m + 100u * i), (int)(k + 100u * i), p + IV[i], v, g, 0);
+}
+
 static void key_start(uint32_t k, uint8_t vel)
 {
-    float p, v = (float)vel / 127.0f;
+    float p, v = (float)vel / 127.0f, g;
+    int side = side_of(k), mode = gmode(side);
+    uint32_t m;
     if (!key_pitch(k, &p))
         return;
+    g = gtime(side);
     ui.kp[k] = p;
-    eng_note_on((int)k, p, v);
-    if (set.epic) {
-        eng_note_on(100 + (int)k, p + 7.0f, v * 0.85f);
-        eng_note_on(200 + (int)k, p + 12.0f, v * 0.8f);
+    ui.kvel[k] = vel;
+    ui.ptime[k] = ++ui.pcount;
+    m = ui.mono[side] ? ui.mono[side] - 1u : 99u;
+    if (mode != GM_POLY && m < NKEYS && m != k && (ui.sounding >> m & 1u)) {   /* legato: the voice slides here */
+        notes_move(m, k, p, v, g);
+        ui.sounding &= ~(1u << m);
+        ui.latched &= ~(1u << m);
+    } else {
+        float from = g > 0.0f && mode != GM_LEGATO && ui.has_last[side] ? ui.last_p[side] : p;
+        notes_on(k, p, v, from, g);
     }
+    if (mode != GM_POLY)
+        ui.mono[side] = (uint8_t)(k + 1u);
+    ui.last_p[side] = p;
+    ui.has_last[side] = 1;
     ui.sounding |= 1u << k;
 }
 
 static void key_stop(uint32_t k)
 {
+    int side = side_of(k);
     eng_note_off((int)k);
     eng_note_off(100 + (int)k);
     eng_note_off(200 + (int)k);
     ui.sounding &= ~(1u << k);
     ui.prs[k] = 0;
+    if (ui.mono[side] == k + 1u)
+        ui.mono[side] = 0;
 }
 
 /* the melody's root: the lowest note of the low split that sounds (else it stays the last) */
@@ -431,6 +494,11 @@ static void deep_update(void)
             }
     if (want == ui.deep)
         return;
+    if (ui.deep > 0.0f && want > 0.0f && set.glide_l + set.glide_h) {   /* it slides with the glide */
+        eng_note_move(DEEP_ID, DEEP_ID, want, 0.65f, gtime(split_on() ? SIDE_L : SIDE_R), 0);
+        ui.deep = want;
+        return;
+    }
     if (ui.deep > 0.0f)
         eng_note_off(DEEP_ID);
     if (want > 0.0f)
@@ -451,8 +519,10 @@ static void key_press(uint32_t k, uint8_t vel, uint32_t down_before)
 {
     int side = side_of(k);
     if (holds(side)) {
-        if (!(down_before & side_mask(side)))   /* no key down on its side: a new chord there */
-            latched_release(side_mask(side));
+        if (!(down_before & side_mask(side))) {   /* no key down on its side: a new chord there (MONO: it slides) */
+            uint32_t keep = gmode(side) != GM_POLY && ui.mono[side] ? 1u << (ui.mono[side] - 1u) : 0u;
+            latched_release(side_mask(side) & ~keep);
+        }
         ui.latched |= 1u << k;
     }
     key_start(k, vel);
@@ -464,9 +534,29 @@ static void key_press(uint32_t k, uint8_t vel, uint32_t down_before)
 
 static void key_release(uint32_t k)
 {
-    if (!(holds(side_of(k)) && (ui.latched >> k & 1u)))
+    int side = side_of(k);
+    if (holds(side) && (ui.latched >> k & 1u)) {
+        /* it stays */
+    } else if (gmode(side) != GM_POLY && ui.mono[side] == k + 1u) {   /* MONO: back to the last key still held */
+        uint32_t j, best = 99u, bt = 0, held = ui.keys & side_mask(side) & ~(1u << k);
+        float p;
+        for (j = 0; j < NKEYS; j++)
+            if ((held >> j & 1u) && ui.ptime[j] > bt) {
+                bt = ui.ptime[j];
+                best = j;
+            }
+        if (best < NKEYS && key_pitch(best, &p)) {
+            notes_move(k, best, p, (float)ui.kvel[best] / 127.0f, gtime(side));
+            ui.sounding = (ui.sounding & ~(1u << k)) | (1u << best);
+            ui.kp[best] = p;
+            ui.mono[side] = (uint8_t)(best + 1u);
+            ui.last_p[side] = p;
+            ui.prs[k] = 0;
+        } else
+            key_stop(k);
+    } else if (ui.sounding >> k & 1u)
         key_stop(k);
-    else if (ui.prs[k]) {                /* it stays, but no longer pressed */
+    if ((ui.latched >> k & 1u) && ui.prs[k]) {   /* it stays, but no longer pressed */
         eng_press((int)k, 0.0f);
         eng_press(100 + (int)k, 0.0f);
         eng_press(200 + (int)k, 0.0f);
@@ -501,21 +591,25 @@ static void all_off(void)
 
 /* ------------------------------------------------------------------ pages --- */
 /* the knobs of SPLIT and PRESSURE: a value, its range, its text */
-static const char *const PAGE_NAME[NPAGE] = {"MAIN", "SPLIT", "PRESSURE"};
-static const char *const PK_NAME[2][4] = {{"SPLIT", "POINT", "SCALE", "FOLLOW"},
-                                          {"PRESSURE", "AMOUNT", "TONE", "VIBRATO"}};
+static const char *const PAGE_NAME[NPAGE] = {"MAIN", "SPLIT", "PRESSURE", "GLIDE"};
+static const char *const PK_NAME[3][4] = {{"SPLIT", "POINT", "SCALE", "FOLLOW"},
+                                          {"PRESSURE", "AMOUNT", "TONE", "VIBRATO"},
+                                          {"LOW GLIDE", "LOW MODE", "GLIDE", "MODE"}};
 
 static int32_t pk_get(int pg, int k)
 {
     if (pg == PG_SPLIT)
         return k == 0 ? set.split_oct : k == 1 ? set.split_key : k == 2 ? set.scale : set.follow;
+    if (pg == PG_GLIDE)
+        return k == 0 ? set.glide_l : k == 1 ? set.mode_l : k == 2 ? set.glide_h : set.mode_h;
     return k == 0 ? set.press : k == 1 ? set.pamt : k == 2 ? set.tone : set.vib;
 }
 
 static void pk_range(int pg, int k, int32_t *lo, int32_t *hi)
 {
-    static const int8_t LO[2][4] = {{0, 1, 0, 0}, {0, 0, -50, 0}};
-    static const int8_t HI[2][4] = {{3, NKEYS - 1, NSCALE - 1, NFOLLOW - 1}, {NPRESS - 1, 100, 50, 100}};
+    static const int8_t LO[3][4] = {{0, 1, 0, 0}, {0, 0, -50, 0}, {0, 0, 0, 0}};
+    static const int8_t HI[3][4] = {{3, NKEYS - 1, NSCALE - 1, NFOLLOW - 1}, {NPRESS - 1, 100, 50, 100},
+                                    {100, NGMODE - 1, 100, NGMODE - 1}};
     *lo = LO[pg - 1][k];
     *hi = HI[pg - 1][k];
 }
@@ -538,6 +632,26 @@ static void pk_text(int pg, int k, char *t)
             text_cat(t, SCALES[v].name);
         else
             text_cat(t, FOLLOW_NAME[v]);
+    } else if (pg == PG_GLIDE) {
+        if (k & 1)
+            text_cat(t, GMODE_NAME[v]);
+        else if (!v)
+            text_cat(t, "OFF");
+        else {
+            uint32_t ms = (uint32_t)(gl_secs((uint32_t)v) * 1000.0f + 0.5f);
+            if (ms < 1000u) {
+                int_text((int32_t)ms, t);
+                text_cat(t, " MS");
+            } else {
+                char d[4];
+                int_text((int32_t)(ms / 1000u), t);
+                text_cat(t, ".");
+                d[0] = (char)('0' + ms / 100u % 10u);
+                d[1] = 0;
+                text_cat(t, d);
+                text_cat(t, " S");
+            }
+        }
     } else {
         if (k == 0)
             text_cat(t, PRESS_NAME[v]);
@@ -566,6 +680,17 @@ static void pk_set(int pg, int k, int32_t v)
             set.follow = (uint8_t)v;
         if (k <= 1)
             holds_changed();
+    } else if (pg == PG_GLIDE) {
+        if (k == 0)
+            set.glide_l = (uint8_t)v;
+        else if (k == 1)
+            set.mode_l = (uint8_t)v;
+        else if (k == 2)
+            set.glide_h = (uint8_t)v;
+        else
+            set.mode_h = (uint8_t)v;
+        if (k & 1)
+            ui.mono[k == 1 ? SIDE_L : SIDE_R] = 0;
     } else {
         if (k == 0)
             set.press = (uint8_t)v;
@@ -585,7 +710,7 @@ static void pk_set(int pg, int k, int32_t v)
 static void page_knob(int k, int32_t e)
 {
     int pg = ui.page;
-    int32_t lo, hi, v = pk_get(pg, k), list = (pg == PG_SPLIT && k != 1) || (pg == PG_PRESS && k == 0);
+    int32_t lo, hi, v = pk_get(pg, k), list = (pg == PG_SPLIT && k != 1) || (pg == PG_PRESS && k == 0) || (pg == PG_GLIDE && (k & 1));
     pk_range(pg, k, &lo, &hi);
     if (list) {                          /* a list: two detents a step */
         ui.enc_acc[k] += e;
@@ -758,6 +883,8 @@ static void input(void)
             ui.sel_used = 0;
         } else if (k == B_GLO)
             page_go(ui.page == PG_PRESS ? PG_MAIN : PG_PRESS);
+        else if (k == B_EDIT)
+            page_go(ui.page == PG_GLIDE ? PG_MAIN : PG_GLIDE);
     }
     if (ui.sel_t && !(btn >> B_SEL & 1u)) {   /* SEL let go: the SPLIT page (again: MAIN), unless it set the split */
         ui.sel_t = 0;
@@ -829,11 +956,13 @@ static void lights(void)
         btn |= 1u << B_SEL;
     if (ui.page == PG_PRESS)
         btn |= 1u << B_GLO;
+    if (ui.page == PG_GLIDE)
+        btn |= 1u << B_EDIT;
     if (set.octave < 0)
         btn |= 1u << B_OCTDN;
     if (set.octave > 0)
         btn |= 1u << B_OCTUP;
-    dimb = (1u << B_PLAY) | (1u << B_ARP) | (1u << B_SEQ) | (1u << B_SEL) | (1u << B_GLO) | (1u << B_OCTDN) |
+    dimb = (1u << B_PLAY) | (1u << B_ARP) | (1u << B_SEQ) | (1u << B_SEL) | (1u << B_GLO) | (1u << B_EDIT) | (1u << B_OCTDN) |
            (1u << B_OCTUP) | (1u << B_REC) | (1u << B_HOME);
     plat_lights(btn | (ui.btn & ~(1u << B_PLAY)), ui.sounding | ui.keys, dimb, side_mask(SIDE_L), 1);
 }
@@ -988,7 +1117,9 @@ static void draw_panel(void)
     text_cat(t, "CPU ");
     int_text((int32_t)plat_cpu_pct(), n);
     text_cat(t, n);
-    text_cat(t, "%");
+    text_cat(t, "% XR ");                /* xruns: blocks the sound came late (a click each) */
+    int_text((int32_t)plat_xruns(), n);
+    text_cat(t, n);
     cv_text(6, 80, &FONT_XS, t, RGB(40, 140, 150));
     if (set.press != PRESS_OFF) {        /* the pressure: the hardest-pressed key */
         uint32_t k, pmax = 0;
@@ -1187,6 +1318,12 @@ int app_expect(const char *what, int *got)
         *got = set.follow;
     else if (!strcmp(what, "root"))
         *got = ui.root;
+    else if (!strcmp(what, "glide_h"))
+        *got = set.glide_h;
+    else if (!strcmp(what, "mode_h"))
+        *got = set.mode_h;
+    else if (!strcmp(what, "mono"))
+        *got = ui.mono[SIDE_R];
     else if (!strcmp(what, "press"))
         *got = set.press;
     else if (!strcmp(what, "pamt"))

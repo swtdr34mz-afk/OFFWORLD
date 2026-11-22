@@ -238,56 +238,151 @@ typedef struct {
     float a1, b1, a2, b2;                /* the two filter stages' states */
     float drift, drift_to, vib_e;
     float press, ptarget;                /* the key's pressure, gliding to ptarget */
+    float pt, kg;                        /* GLIDE: the pitch it heads for, how fast (a share a chunk; 1 at once) */
+    uint8_t steal;                       /* taken for a new note: fading out fast, then the pending note starts */
+    int pend_id;
+    float pend_pitch, pend_vel, pend_from, pend_kg;
     uint32_t rng;                        /* its own noise (a voice may run on the second core) */
 } voice_t;
 static voice_t V[ENG_NV];
 static const float PANS[ENG_NV] = {-0.9f, 0.9f, -0.5f, 0.5f, -0.2f, 0.2f, -0.7f, 0.7f};
 
 /* the queue: main loop -> render */
-enum { EV_ON, EV_OFF, EV_ALL_OFF, EV_PANIC, EV_PRESS };
+enum { EV_ON, EV_OFF, EV_ALL_OFF, EV_PANIC, EV_PRESS, EV_MOVE };
 typedef struct {
-    uint8_t type;
-    int16_t id;
-    float pitch, vel;
+    uint8_t type, retrig;
+    int16_t id, id2;
+    float pitch, vel, from, g;
 } ev_t;
 #define NQ 64u
 static ev_t Q[NQ];
 static volatile uint32_t q_w, q_r;
-static void push(uint8_t type, int id, float pitch, float vel)
+static ev_t *push(uint8_t type, int id, float pitch, float vel)
 {
+    static ev_t spare;
     uint32_t w = q_w, nx = (w + 1u) % NQ;
     if (nx == q_r)
-        return;                          /* full: dropped (never, at the keys' pace) */
+        return &spare;                   /* full: dropped (never, at the keys' pace) */
     Q[w].type = type;
     Q[w].id = (int16_t)id;
+    Q[w].id2 = (int16_t)id;
     Q[w].pitch = pitch;
     Q[w].vel = vel;
-    q_w = nx;
+    Q[w].from = pitch;
+    Q[w].g = 0.0f;
+    Q[w].retrig = 1;
+    return &Q[w];
 }
-void eng_note_on(int id, float pitch, float vel) { push(EV_ON, id, pitch, vel); }
-void eng_note_off(int id) { push(EV_OFF, id, 0.0f, 0.0f); }
-void eng_all_off(void) { push(EV_ALL_OFF, 0, 0.0f, 0.0f); }
-void eng_panic(void) { push(EV_PANIC, 0, 0.0f, 0.0f); }
-void eng_press(int id, float p) { push(EV_PRESS, id, 0.0f, p); }
+static void commit(void) { q_w = (q_w + 1u) % NQ; }
+void eng_note_on(int id, float pitch, float vel)
+{
+    push(EV_ON, id, pitch, vel);
+    commit();
+}
+void eng_note_glide(int id, float pitch, float vel, float from, float glide_s)
+{
+    ev_t *e = push(EV_ON, id, pitch, vel);
+    e->from = from;
+    e->g = glide_s;
+    commit();
+}
+void eng_note_move(int old_id, int id, float pitch, float vel, float glide_s, int retrig)
+{
+    ev_t *e = push(EV_MOVE, id, pitch, vel);
+    e->id2 = (int16_t)old_id;
+    e->g = glide_s;
+    e->retrig = (uint8_t)(retrig != 0);
+    commit();
+}
+void eng_note_off(int id)
+{
+    push(EV_OFF, id, 0.0f, 0.0f);
+    commit();
+}
+void eng_all_off(void)
+{
+    push(EV_ALL_OFF, 0, 0.0f, 0.0f);
+    commit();
+}
+void eng_panic(void)
+{
+    push(EV_PANIC, 0, 0.0f, 0.0f);
+    commit();
+}
+void eng_press(int id, float p)
+{
+    push(EV_PRESS, id, 0.0f, p);
+    commit();
+}
 
 static uint32_t notes, thunders;
 
-static void start(int id, float pitch, float vel)
+static float kglide(float g) { return g <= 0.0005f ? 1.0f : kchunk(g / 3.0f); }   /* there in about g seconds */
+
+static float vrand(voice_t *v)           /* the voice's own noise, 0..1 (either core may call it) */
+{
+    v->rng ^= v->rng << 13;
+    v->rng ^= v->rng >> 17;
+    v->rng ^= v->rng << 5;
+    return (float)(v->rng >> 8) * (1.0f / 16777216.0f);
+}
+
+static void fresh(voice_t *v, int pick)  /* a silent voice: from zero, its phases scattered (no two alike) */
+{
+    if (!v->rng)
+        v->rng = 0x9E3779B9u * (uint32_t)(pick + 1);
+    v->ea = v->ea_prev = v->ef = 0.0f;
+    v->a1 = v->b1 = v->a2 = v->b2 = 0.0f;
+    v->p1 = vrand(v);
+    v->p2 = vrand(v);
+    v->ps = 0.0f;
+    v->drift = v->drift_to = vrand(v) - 0.5f;
+    v->press = 0.0f;
+}
+
+static void begin(voice_t *v, int id, float pitch, float vel, float from, float kg)
+{
+    v->on = 1;
+    v->rel = v->kill = v->steal = 0;
+    v->sa = v->sf = 0;
+    v->id = id;
+    v->age = 0;
+    v->born = notes++;
+    v->pt = pitch;
+    v->pitch = kg < 1.0f ? from : pitch;
+    v->kg = kg;
+    v->vel = fm_clampf(vel, 0.05f, 1.0f);
+    v->vib_e = 0.0f;
+    v->ptarget = 0.0f;
+}
+
+static void start(int id, float pitch, float vel, float from, float glide_s)
 {
     int i, pick = -1;
     voice_t *v;
-    for (i = 0; i < ENG_NV; i++)         /* the same note again: struck again */
-        if (V[i].on && V[i].id == id) {
-            pick = i;
-            break;
+    float kg = kglide(glide_s);
+    for (i = 0; i < ENG_NV; i++)         /* the same note again: struck again, where it is */
+        if (V[i].on && V[i].id == id && !V[i].steal) {
+            begin(&V[i], id, pitch, vel, V[i].pitch, kg < 1.0f ? kg : 1.0f);
+            return;
         }
-    if (pick < 0)
+    {                                    /* a free voice, in the half with fewer sounding (the cores share the work) */
+        int n0 = 0, n1 = 0, h, first;
         for (i = 0; i < ENG_NV; i++)
-            if (!V[i].on) {
-                pick = i;
-                break;
-            }
-    if (pick < 0) {                      /* all busy: the quietest let-go one, else the oldest */
+            if (V[i].on)
+                *(i < ENG_NV / 2 ? &n0 : &n1) += 1;
+        first = n1 < n0 ? ENG_NV / 2 : 0;
+        for (h = 0; h < 2; h++) {
+            int b0 = h == 0 ? first : ENG_NV / 2 - first;
+            for (i = b0; i < b0 + ENG_NV / 2; i++)
+                if (!V[i].on) {
+                    fresh(&V[i], i);
+                    begin(&V[i], id, pitch, vel, from, kg);
+                    return;
+                }
+        }
+    }
+    {                                    /* all busy: the quietest let-go one, else the oldest */
         float lo = 9.0f;
         for (i = 0; i < ENG_NV; i++)
             if (V[i].rel && V[i].ea < lo) {
@@ -304,27 +399,21 @@ static void start(int id, float pitch, float vel)
         }
     }
     v = &V[pick];
-    if (!v->on) {                        /* a silent voice: from zero, its phases scattered (no two alike) */
-        v->ea = v->ea_prev = v->ef = 0.0f;
-        v->a1 = v->b1 = v->a2 = v->b2 = 0.0f;
-        v->p1 = rndu();
-        v->p2 = rndu();
-        v->ps = 0.0f;
-        v->drift = v->drift_to = white() * 0.5f;
-        v->press = 0.0f;
-    }                                    /* a voice taken over: its envelopes go on from where they are (no click) */
-    v->on = 1;
-    v->rel = v->kill = 0;
-    v->sa = v->sf = 0;
+    if (v->ea < 0.003f) {
+        fresh(v, pick);
+        begin(v, id, pitch, vel, from, kg);
+        return;
+    }
+    /* still sounding: it fades out in a few ms first, then the new note starts clean (no jump, no click) */
+    v->steal = 1;
+    v->rel = 0;
     v->id = id;
-    v->age = 0;
     v->born = notes++;
-    v->pitch = pitch;
-    v->vel = fm_clampf(vel, 0.05f, 1.0f);
-    v->vib_e = 0.0f;
-    v->ptarget = 0.0f;
-    if (!v->rng)
-        v->rng = 0x9E3779B9u * (uint32_t)(pick + 1);
+    v->pend_id = id;
+    v->pend_pitch = pitch;
+    v->pend_vel = vel;
+    v->pend_from = from;
+    v->pend_kg = kg;
 }
 
 static void events(void)
@@ -334,11 +423,42 @@ static void events(void)
         int i;
         q_r = (q_r + 1u) % NQ;
         if (e.type == EV_ON)
-            start(e.id, e.pitch, e.vel);
-        else if (e.type == EV_OFF) {
+            start(e.id, e.pitch, e.vel, e.from, e.g);
+        else if (e.type == EV_MOVE) {    /* legato: the old note's voice slides to the new one */
+            int done = 0;
+            for (i = 0; i < ENG_NV && !done; i++)
+                if (V[i].on && V[i].id == e.id2) {
+                    voice_t *v = &V[i];
+                    float kg = kglide(e.g);
+                    if (v->steal) {
+                        v->pend_id = v->id = e.id;
+                        v->pend_pitch = e.pitch;
+                    } else {
+                        v->id = e.id;
+                        v->pt = e.pitch;
+                        v->kg = kg;
+                        if (kg >= 1.0f)
+                            v->pitch = e.pitch;
+                        if (e.retrig || v->rel) {
+                            v->rel = v->kill = 0;
+                            v->sa = v->sf = 0;
+                            v->age = 0;
+                            v->vel = fm_clampf(e.vel, 0.05f, 1.0f);
+                        }
+                    }
+                    done = 1;
+                }
+            if (!done)
+                start(e.id, e.pitch, e.vel, e.pitch, 0.0f);
+        } else if (e.type == EV_OFF) {
             for (i = 0; i < ENG_NV; i++)
-                if (V[i].on && V[i].id == e.id)
+                if (V[i].on && V[i].id == e.id) {
+                    if (V[i].steal) {    /* let go before it began: it only fades */
+                        V[i].steal = 0;
+                        V[i].kill = 1;
+                    }
                     V[i].rel = 1;
+                }
         } else if (e.type == EV_PRESS) {
             for (i = 0; i < ENG_NV; i++)
                 if (V[i].on && V[i].id == e.id)
@@ -398,7 +518,7 @@ static struct {
     uint8_t th_on;
     /* the rest */
     float lfo, wow1, wow2;
-    float level, gain_s;
+    float level, gain_s, lim_env, gr_min;
 } E;
 
 void eng_init(void)
@@ -423,6 +543,7 @@ void eng_init(void)
         off += AP_LEN[i];
     }
     q_w = q_r = 0;
+    E.gr_min = 1.0f;
     eng_sound(0, PRESETS[0].m, 0.0f, 0.3f, PRESS_FILTER, 0.7f);
     params_take();
     P = T;
@@ -436,7 +557,9 @@ static void voice_chunk(voice_t *v, int slot, float *L, float *R, float lfo, flo
     uint32_t s;
     /* the amp envelope (to the chunk's end; the samples ramp to it) */
     ea0 = v->ea;
-    if (v->rel)
+    if (v->steal)
+        v->ea += (0.0f - v->ea) * 0.35f; /* ~8 ms */
+    else if (v->rel)
         v->ea += (0.0f - v->ea) * (v->kill ? 0.12f : P.kr_a);
     else if (v->sa == 0) {
         v->ea += (1.3f - v->ea) * P.ka_a;
@@ -448,7 +571,7 @@ static void voice_chunk(voice_t *v, int slot, float *L, float *R, float lfo, flo
         v->ea += (P.s_a - v->ea) * P.kd_a;
     ea1 = v->ea;
     /* the filter's brass envelope */
-    if (v->rel)
+    if (v->rel || v->steal)
         v->ef += (0.0f - v->ef) * P.kr_f;
     else if (v->sf == 0) {
         v->ef += (1.3f - v->ef) * P.ka_f;
@@ -473,6 +596,7 @@ static void voice_chunk(voice_t *v, int slot, float *L, float *R, float lfo, flo
         v->vib_e += (1.0f - v->vib_e) * 0.0009f;
     v->age++;
     v->press += (v->ptarget - v->press) * 0.05f;   /* ~15 ms */
+    v->pitch += (v->pt - v->pitch) * v->kg;          /* GLIDE */
     pp = v->press * P.pamt;
     p_oct = P.press == PRESS_FILTER ? 3.5f * pp : P.press == PRESS_SWELL ? 0.7f * pp : P.press == PRESS_POWER ? 1.5f * pp : 0.0f;
     p_amp = P.press == PRESS_SWELL ? 1.0f + 1.5f * pp : P.press == PRESS_POWER ? 1.0f + 0.8f * pp : 1.0f;
@@ -500,14 +624,17 @@ static void voice_chunk(voice_t *v, int slot, float *L, float *R, float lfo, flo
     pan = P.spread * PANS[slot];
     gl = 1.0f - (pan > 0.0f ? pan : 0.0f) * 0.75f;
     gr = 1.0f + (pan < 0.0f ? pan : 0.0f) * 0.75f;
-    vamp = 0.19f * (0.55f + 0.45f * v->vel) * p_amp;
+    vamp = 0.13f * (0.55f + 0.45f * v->vel) * p_amp;
     drv = P.drive + p_drv;
     dea = (ea1 - ea0) * (1.0f / (float)CH);
     for (s = 0; s < CH; s++) {
         float o, x, v1, v2, v3, y, amp = ea0 + dea * (float)(s + 1u);
         o = saw(v->p1, i1);
-        o += P.o2_lvl * (P.o2_pulse ? pulse(v->p2, i2, P.pw) : saw(v->p2, i2));
-        o += P.sub * fm_sin_turns(v->ps);
+        o += P.o2_lvl * (P.o2_pulse ? 0.5f * pulse(v->p2, i2, P.pw) : saw(v->p2, i2));
+        {                                /* the sub: a parabola, near enough to a sine an octave down */
+            float q = v->ps < 0.5f ? v->ps : v->ps - 0.5f, sn = 16.0f * q * (0.5f - q);
+            o += P.sub * (v->ps < 0.5f ? sn : -sn);
+        }
         v->p1 += i1;
         if (v->p1 >= 1.0f)
             v->p1 -= 1.0f;
@@ -541,7 +668,11 @@ static void voice_chunk(voice_t *v, int slot, float *L, float *R, float lfo, flo
     v->b1 = flush_dn(v->b1);
     v->a2 = flush_dn(v->a2);
     v->b2 = flush_dn(v->b2);
-    if (v->rel && v->ea < 0.0004f)
+    if (v->steal && v->ea < 0.003f) {   /* faded: the pending note, clean */
+        int slot2 = slot;
+        fresh(v, slot2);
+        begin(v, v->pend_id, v->pend_pitch, v->pend_vel, v->pend_from, v->pend_kg);
+    } else if (v->rel && v->ea < 0.0008f)
         v->on = 0;
 }
 
@@ -557,13 +688,15 @@ static inline float rv_read(uint32_t i, float d)
     fr = pos - (float)i0;
     {
         uint32_t i1 = i0 + 1u >= mx ? 0u : i0 + 1u;
-        return ((float)b[i0] + fr * (float)(b[i1] - b[i0])) * (1.0f / 8192.0f);
+        return ((float)b[i0] + fr * (float)(b[i1] - b[i0])) * (1.0f / 4096.0f);
     }
 }
 
-static inline int16_t q16(float x)
+static inline int16_t q16(float x)      /* a reverb sample: +-8, rounded off softly from 4 (no hard clip) */
 {
-    x *= 8192.0f;
+    if (x > 4.0f || x < -4.0f)
+        x = (x > 0.0f ? 4.0f : -4.0f) + 3.9f * fm_tanhf((x - (x > 0.0f ? 4.0f : -4.0f)) * 0.26f);
+    x *= 4096.0f;
     if (x > 32767.0f)
         x = 32767.0f;
     if (x < -32767.0f)
@@ -574,6 +707,7 @@ static inline int16_t q16(float x)
 /* the voices: a block's worth, chunk by chunk; half on the second core (its own buffers) */
 #define NBLK 512u                        /* frames a block at most */
 #define NCHK (NBLK / CH)
+#define NBLK_USE 256u                    /* the app's block (app.h APP_BLOCK): the pipeline needs them alike */
 static float vb_l[2][NBLK], vb_r[2][NBLK];
 static float blk_lfo[NCHK], blk_wow[NCHK];
 static uint32_t blk_n;
@@ -589,17 +723,18 @@ static void voices_render(uint32_t from, uint32_t to, float *L, float *R)
                 voice_chunk(&V[i], (int)i, L + c * CH, R + c * CH, blk_lfo[c], blk_wow[c]);
 }
 
-static void job_half(uint32_t arg)       /* the second core: voices 4..7 */
-{
-    (void)arg;
-    voices_render(ENG_NV / 2u, ENG_NV, vb_l[1], vb_r[1]);
-}
+/* With two cores the work is a pipeline: the second core renders this block's voices while the first runs the
+ * effects on the last block's (one block later: 5.8 ms). Each core then carries about half. One core: both here. */
+static uint8_t vb_w;                     /* the buffer the voices are written to this block */
+static uint8_t vb_full;                  /* the other one holds a block of voices, ready for the effects */
+static void job_voices(uint32_t arg) { voices_render(0, ENG_NV, vb_l[arg], vb_r[arg]); }
 
 void eng_render(int32_t *lr, uint32_t n, float gain)
 {
     uint32_t c0, s, i, c;
     float lvl = 0.0f, pmax = 0.0f, ens;
     int on2;
+    uint8_t rd;
     if (n > NBLK)
         n = NBLK;
     params_take();
@@ -620,20 +755,27 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
         blk_lfo[c] = fm_sin_turns(E.lfo);
         blk_wow[c] = 0.7f * fm_sin_turns(E.wow1) + 0.3f * fm_sin_turns(E.wow2);
     }
-    on2 = plat_cpu2_on() && plat_cpu2_run(job_half, 0);
-    voices_render(0, ENG_NV / 2u, vb_l[0], vb_r[0]);
-    if (!on2 || plat_cpu2_wait() != 0)
-        job_half(0);
     for (i = 0; i < ENG_NV; i++)         /* POWER: the hardest-pressed key opens the ensemble */
         if (V[i].on && V[i].press > pmax)
             pmax = V[i].press;
+    on2 = plat_cpu2_on() && n == NBLK_USE && plat_cpu2_run(job_voices, vb_w);
+    if (on2) {
+        rd = (uint8_t)(vb_w ^ 1u);       /* the effects on the last block's voices, meanwhile */
+        if (!vb_full) {
+            for (s = 0; s < n; s++)
+                vb_l[rd][s] = vb_r[rd][s] = 0.0f;
+        }
+    } else {
+        job_voices(vb_w);
+        rd = vb_w;
+    }
     ens = P.press == PRESS_POWER ? fm_minf(1.0f, P.ens + 0.6f * pmax * P.pamt) : P.ens;
     for (c0 = 0; c0 < n; c0 += CH) {
         float L[CH], R[CH], ensd[3], rv_mod[8], dsend = P.dsend, dfb = P.dfb, wet = P.wet;
         uint32_t m = n - c0 < CH ? n - c0 : CH;
         for (s = 0; s < m; s++) {
-            L[s] = vb_l[0][c0 + s] + vb_l[1][c0 + s];
-            R[s] = vb_r[0][c0 + s] + vb_r[1][c0 + s];
+            L[s] = vb_l[rd][c0 + s];
+            R[s] = vb_r[rd][c0 + s];
         }
         /* the ensemble's three taps: 9 ms apart by a slow and a fast sway, a third of a turn apart */
         E.ens_ph += 0.55f * (float)CH / SR;
@@ -781,7 +923,15 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
             }
             sum = 0.0f;
             for (i = 0; i < 8u; i++) {
-                float yy = rv_read(i, rv_mod[i]);
+                float yy;
+                if (i == 1u || i == 4u || i == 6u)
+                    yy = rv_read(i, rv_mod[i]);
+                else {                   /* a whole sample's delay (it moves a sample at a time) */
+                    uint32_t d = (uint32_t)rv_mod[i], mx = E.rv_max[i], at = E.rv_w[i] + mx - d;
+                    if (at >= mx)
+                        at -= mx;
+                    yy = (float)rv_mem[E.rv_off[i] + at] * (1.0f / 4096.0f);
+                }
                 if (!P.freeze) {
                     E.rv_lp[i] += P.damp_k * (yy - E.rv_lp[i]);
                     yy = E.rv_lp[i];
@@ -804,14 +954,20 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
             wr -= E.rv_hpr;
             l = l * (1.0f - 0.45f * wet) + wl * wet * 1.5f;
             r = r * (1.0f - 0.45f * wet) + wr * wet * 1.5f;
-            /* the master: clean below 0.6, rounded off above, never over full scale */
-            if (fm_fabsf(l) > 0.6f) {
-                float o = 0.6f + 0.4f * fm_tanhf((fm_fabsf(l) - 0.6f) * 2.5f);
-                l = l > 0.0f ? o : -o;
-            }
-            if (fm_fabsf(r) > 0.6f) {
-                float o = 0.6f + 0.4f * fm_tanhf((fm_fabsf(r) - 0.6f) * 2.5f);
-                r = r > 0.0f ? o : -o;
+            /* the master: a limiter that turns it down (fast down, slow back up: no distortion), then a soft edge at
+             * the very top for what slips through */
+            {
+                float pk = fm_maxf(fm_fabsf(l), fm_fabsf(r)), g;
+                E.lim_env = pk > E.lim_env ? E.lim_env + (pk - E.lim_env) * 0.25f : E.lim_env * 0.99993f;
+                g = E.lim_env > 0.55f ? 0.55f / E.lim_env : 1.0f;
+                l *= g;
+                r *= g;
+                if (fm_fabsf(l) > 0.8f)
+                    l = l > 0.0f ? 0.8f + 0.2f * fm_tanhf((l - 0.8f) * 5.0f) : -0.8f - 0.2f * fm_tanhf((-l - 0.8f) * 5.0f);
+                if (fm_fabsf(r) > 0.8f)
+                    r = r > 0.0f ? 0.8f + 0.2f * fm_tanhf((r - 0.8f) * 5.0f) : -0.8f - 0.2f * fm_tanhf((-r - 0.8f) * 5.0f);
+                if (g < E.gr_min)
+                    E.gr_min = g;
             }
             lvl = fm_maxf(lvl, fm_fabsf(l) + fm_fabsf(r));
             E.gain_s += (gain - E.gain_s) * 0.004f;
@@ -823,6 +979,13 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
         E.dl_lpl = flush_dn(E.dl_lpl);
         E.dl_lpr = flush_dn(E.dl_lpr);
     }
+    if (on2) {                           /* this block's voices: ready for the next */
+        if (plat_cpu2_wait() != 0)
+            job_voices(vb_w);            /* (the second core gave up: done here) */
+        vb_w ^= 1u;
+        vb_full = 1;
+    } else
+        vb_full = 0;
     E.level = lvl * 0.5f > E.level ? lvl * 0.5f : E.level * 0.97f;
 }
 
@@ -835,5 +998,11 @@ int eng_voices(void)
     return k;
 }
 float eng_level(void) { return E.level; }
+float eng_limit(void)                    /* the limiter's deepest cut since the last call, 0..1 (1: none) */
+{
+    float g = E.gr_min;
+    E.gr_min = 1.0f;
+    return g;
+}
 uint32_t eng_thunder(void) { return thunders; }
 uint32_t eng_notes(void) { return notes; }

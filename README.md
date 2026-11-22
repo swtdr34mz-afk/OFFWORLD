@@ -11,6 +11,13 @@ slowly and it stops for a few detents on each one, whose name lights up.
 
 ![OFFWORLD](site/img/screen-main.png) ![The title](site/img/screen-splash.png)
 
+## Version 0.3: GLIDE, clean at full
+
+- **GLIDE** (EDIT): LOW GLIDE and LOW MODE for the low split, GLIDE and MODE for the right hand (the whole keyboard with the split off). Time from off to 3 s. POLY: every note its own voice, gliding from the last note of its side. MONO: one voice a side, a new key slides it there without a new attack, always gliding. LEGATO: as MONO, gliding only when the notes overlap. With LOW HOLD and MONO the low drone slides from note to note; the DRONE's deep root slides with it.
+- No more distortion: a limiter that turns the level down instead of clipping, the pulse wave at the saw's level, more room in the reverb.
+- No more clicks when a voice is taken for a new note: it fades out in a few ms first.
+- The two cores as a pipeline: the second renders the voices while the first runs the effects (5.8 ms later). The panel shows CPU and XR (late blocks).
+
 ## Version 0.2: the low split, pressure, the film
 
 - **SPLIT** (SEL): the keys left of the split point play 1 to 3 octaves down. **LOW HOLD** (SEQ) keeps the low note(s) sounding on their own; a new low note replaces them, and the right hand plays free.
@@ -45,6 +52,7 @@ keeps its own knobs.
 | SEQ | **LOW HOLD** on / off (turns the split on if it is off) |
 | SEL | The SPLIT page: SPLIT, POINT, SCALE, FOLLOW (again: back). Held + a key: the split there |
 | GLO | The PRESSURE page: PRESSURE, AMOUNT, TONE, VIBRATO (again: back) |
+| EDIT | The GLIDE page: LOW GLIDE, LOW MODE, GLIDE, MODE (again: back) |
 | HOME | Back to the main page |
 | OCT- / OCT+ | The octave |
 | HOME held 1 s | The preset's knobs back as they came |
@@ -59,8 +67,9 @@ Settings save themselves a few seconds after the last change (DRONE starts off).
 ## Roadmap
 
 1. The engine, the four macros, DRONE, EPIC, the city (0.1)
-2. The low split, LOW HOLD, FOLLOW, PRESSURE, the second core, the film (0.2, this version)
-3. Pages: TONE (oscillators, filter), SPACE (reverb and delay in detail), MOD (vibrato, drift, a slow filter LFO)
-4. More presets, the knobs' values per preset saved as user presets
-5. Glide between drone chords, a ribbon-style pitch bend on the knobs
-6. More scenes
+2. The low split, LOW HOLD, FOLLOW, PRESSURE, the second core, the film (0.2)
+3. GLIDE, the limiter, clean voice stealing, the cores as a pipeline (0.3, this version)
+4. Pages: TONE (oscillators, filter), SPACE (reverb and delay in detail), MOD (vibrato, drift, a slow filter LFO)
+5. More presets, the knobs' values per preset saved as user presets
+6. A ribbon-style pitch bend on the knobs
+7. More scenes

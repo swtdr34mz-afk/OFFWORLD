@@ -55,6 +55,10 @@ enum { PRESS_OFF, PRESS_FILTER, PRESS_SWELL, PRESS_POWER, PRESS_VIBRATO, NPRESS 
 void eng_sound(int preset, const uint8_t m[4], float tone, float vib, int press, float pamt);
 /* a note: id names it (the same id again strikes it again), pitch in MIDI semitones, velocity 0..1 */
 void eng_note_on(int id, float pitch, float vel);
+/* GLIDE: a new note that slides from pitch from to pitch in about glide_s seconds */
+void eng_note_glide(int id, float pitch, float vel, float from, float glide_s);
+/* legato: the voice of old_id becomes id and slides to pitch (retrig: its envelopes start again); none: a new note */
+void eng_note_move(int old_id, int id, float pitch, float vel, float glide_s, int retrig);
 void eng_note_off(int id);
 void eng_press(int id, float p);        /* a key's pressure 0..1 */
 void eng_all_off(void);                  /* every note let go (they ring out) */
@@ -65,5 +69,6 @@ void eng_render(int32_t *lr, uint32_t n, float gain);
 /* for the screen and the tests */
 int eng_voices(void);                    /* voices sounding */
 float eng_level(void);                   /* the output, 0..1, smoothed */
+float eng_limit(void);                   /* the limiter's deepest cut since the last call (1: none) */
 uint32_t eng_thunder(void);              /* thunders since the start (the screen flashes) */
 uint32_t eng_notes(void);                /* notes started since the start */
