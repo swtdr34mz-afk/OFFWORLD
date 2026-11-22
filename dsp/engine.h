@@ -73,6 +73,9 @@ void eng_shed(void);                     /* the render ran late: a voice let go 
 void eng_render(int32_t *lr, uint32_t n, float gain);
 
 /* for the screen and the tests */
+/* a write to the flash stops the sound for a moment: the app fades the output out first (and back in after) */
+void eng_duck(int on);
+int eng_ducked(void);
 int eng_voices(void);                    /* voices sounding */
 float eng_level(void);                   /* the output, 0..1, smoothed */
 float eng_limit(void);                   /* the limiter's deepest cut since the last call (1: none) */

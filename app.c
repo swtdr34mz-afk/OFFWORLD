@@ -346,6 +346,8 @@ static struct {
     uint8_t cue_pp[CUE_NOTES];
     uint32_t cue_at;
     uint32_t save_t;
+    uint8_t ducking;
+    uint32_t duck_t;
     uint32_t rnd;
 } ui;
 
@@ -1631,22 +1633,138 @@ static void draw_sheet(void)
     cv_blit(0, 144);
 }
 
+/* the intro, 4 s: a terminal boots; the city rises out of the dark in the rain, searchlights sweep, a car crosses;
+ * the title buzzes on letter by letter like neon tubes, rain in Japanese beside it; lightning; the name. Drawn in two
+ * bands (the canvas holds 144 rows), each from the same picture in screen rows. */
+#define INTRO_MS 4200u
+static const char *const BOOT[4] = {"> POWER .......... OK", "> CITY GRID ...... ONLINE", "> WEATHER ........ RAIN",
+                                    "> LINK ........... OFFWORLD"};
+
+static void intro_band(int32_t y0, int32_t h, uint32_t ms)
+{
+    uint32_t i, glow = ms < 600u ? 0u : ms > 1800u ? 256u : (ms - 600u) * 256u / 1200u;
+    int32_t y, rise = ms < 500u ? 0 : ms > 1700u ? 100 : (int32_t)((ms - 500u) / 12u);
+    uint16_t sky0 = mix565(C_BLACK, RGB(6, 4, 22), glow), sky1 = mix565(C_BLACK, RGB(150, 64, 36), glow);
+    int flash = ms >= 3000u && ms < 3120u;
+    cv_begin(240, (uint32_t)h, C_BLACK);
+    for (y = 0; y < h; y++) {            /* the sky, the smog lit from below */
+        int32_t sy = y0 + y;
+        uint32_t t = sy < 200 ? (uint32_t)(sy * sy) * 256u / 40000u : 256u;
+        uint16_t c = mix565(sky0, sky1, t);
+        if (flash)
+            c = mix565(c, RGB(200, 190, 240), 150);
+        cv_rect(0, y, 240, 1, c);
+    }
+    if (ms > 900u)                       /* searchlights */
+        for (i = 0; i < 2u; i++) {
+            int32_t bx = 60 + (int32_t)i * 120, dx = (int32_t)(90.0f * fm_sin_turns((float)ms * 0.00012f + (float)i * 0.4f));
+            uint16_t c = mix565(C_BLACK, RGB(50, 50, 80), glow);
+            cv_line(bx, 240 - y0, bx + dx, 60 - y0, c);
+            cv_line(bx + 1, 240 - y0, bx + dx + 4, 60 - y0, c);
+        }
+    for (i = 0; i < 60u; i++) {          /* the far towers, rising */
+        uint32_t q = hsh(i, 777u);
+        int32_t th = (int32_t)(20u + q % 60u) * rise / 100, x = (int32_t)i * 4;
+        cv_rect(x, 240 - th - y0, 4, th, RGB(22, 16, 42));
+        if (th > 10 && (q & 3u) == 0u && ms > 1500u)
+            cv_rect(x + 1, 240 - th + 4 + (int32_t)((q >> 4) & 15u) - y0, 1, 1, RGB(140, 90, 50));
+    }
+    for (i = 0; i < 9u; i++) {           /* the near towers, rising later, their windows coming on */
+        uint32_t q = hsh(i, 991u);
+        int32_t w = 18 + (int32_t)(q % 14u), th = (int32_t)(50u + (q >> 5) % 70u) * (rise > 30 ? rise - 30 : 0) / 70,
+                x = (int32_t)i * 27 - 4 + (int32_t)(q % 7u), wy, wx;
+        cv_rect(x, 240 - th - y0, w, th, RGB(10, 10, 24));
+        for (wy = 240 - th + 5; wy < 236; wy += 7)
+            for (wx = x + 3; wx < x + w - 3; wx += 5)
+                if (hsh(q, (uint32_t)(wy * 7 + wx)) % 5u == 0u && ms > 1900u + (uint32_t)(240 - wy) * 6u)
+                    cv_rect(wx, wy - y0, 2, 2, RGB(255, 190, 90));
+        if ((q >> 9) & 1u)
+            cv_rect(x, 240 - th - y0, 1, th, (q >> 10) & 1u ? C_CYAN : C_MAG);
+    }
+    if (ms > 1300u && ms < 3600u) {      /* a car crossing */
+        int32_t cx = (int32_t)((ms - 1300u) / 9u) - 10, cy = 132 - y0;
+        for (i = 1; i < 7u; i++)
+            cv_rect(cx - (int32_t)i * 4, cy + 1, 3, 1, mix565(C_BLACK, C_CYAN, 220u - i * 30u));
+        cv_rect(cx - 3, cy, 7, 3, RGB(60, 60, 80));
+        cv_rect(cx + 4, cy + 1, 2, 1, RGB(255, 255, 230));
+    }
+    if (ms > 700u)                       /* rain */
+        for (i = 0; i < 70u; i++) {
+            uint32_t q = hsh(i, 4242u);
+            int32_t x = (int32_t)(q % 250u), sp = 5 + (int32_t)((q >> 8) % 4u),
+                    yy = (int32_t)((q >> 12) % 240u + ms / 33u * (uint32_t)sp) % 260 - 10;
+            x -= yy / 7;
+            cv_line(x, yy - y0, x - 1, yy + 6 - y0, mix565(C_BLACK, C_RAIN, glow));
+        }
+    if (flash && y0 == 0) {              /* the bolt */
+        int32_t bx = 186, by;
+        for (by = 0; by < 120; by += 12) {
+            int32_t nx = bx + (int32_t)(hsh((uint32_t)by, 5u) % 13u) - 6;
+            cv_line(bx, by, nx, by + 12, RGB(240, 235, 255));
+            bx = nx;
+        }
+    }
+    if (y0 == 0) {
+        /* the terminal booting */
+        for (i = 0; i < 4u; i++) {
+            uint32_t t0 = 80u + i * 260u, n;
+            char t[32];
+            uint32_t k;
+            if (ms < t0)
+                break;
+            n = (ms - t0) / 14u;
+            for (k = 0; k < 31u && BOOT[i][k] && k < n; k++)
+                t[k] = BOOT[i][k];
+            t[k] = 0;
+            cv_text(4, 4 + (int32_t)i * 12, &FONT_XS, t,
+                    ms > 1700u ? mix565(RGB(40, 140, 150), C_BLACK, (ms - 1700u) / 4u > 230u ? 230u : (ms - 1700u) / 4u)
+                               : RGB(60, 210, 220));
+        }
+        /* the title: each letter buzzes on, then holds */
+        if (ms > 1700u) {
+            static const char *const T = "OFFWORLD";
+            const felucca_font_t *f = &APP_BIG_FONT;
+            int32_t x = 120 - text_w(f, T) / 2;
+            for (i = 0; T[i]; i++) {
+                char c[2] = {T[i], 0};
+                uint32_t on = 1700u + i * 110u, lit;
+                lit = ms > on + 260u || (ms > on && ((ms / 40u + i * 7u) * 2654435761u >> 30) > 0u);
+                if (ms > 3000u && ms < 3080u && i == 4u)
+                    lit = 0;             /* one tube stutters in the lightning */
+                if (lit) {
+                    cv_text(x + 2, 72, f, c, RGB(120, 20, 90));
+                    cv_text(x - 1, 70, f, c, RGB(20, 90, 120));
+                    cv_text(x, 70, f, c, C_CYAN);
+                } else if (ms > on)
+                    cv_text(x, 70, f, c, RGB(30, 40, 60));
+                x += text_w(f, c);
+            }
+            if (ms > 1700u && ms < 2400u) {   /* a scan passing over it */
+                int32_t sy = 60 + (int32_t)((ms - 1700u) / 14u);
+                cv_rect(0, sy, 240, 1, mix565(C_CYAN, C_BLACK, 120));
+            }
+        }
+        if (ms > 2500u)                  /* the sign: rain */
+            draw_kanji(200, 20, 2, ((ms / 60u) % 9u == 0u && ms < 3300u) ? RGB(80, 20, 60) : C_MAG);
+        if (ms > 3150u) {
+            const char *by = "by swtdr34mz";
+            uint32_t n = (ms - 3150u) / 40u, k;
+            char t[16];
+            for (k = 0; k < 15u && by[k] && k < n; k++)
+                t[k] = by[k];
+            t[k] = 0;
+            cv_text(120 - text_w(&FONT_XS, by) / 2, 108, &FONT_XS, t, RGB(170, 170, 190));
+        }
+    }
+    for (y = (int32_t)((ms / 40u) & 3u); y < h; y += 4)   /* scanlines */
+        px_dim_row(y);
+    cv_blit(0, (uint32_t)y0);
+}
+
 static void draw_intro(uint32_t ms)
 {
-    int lit;
-    cv_begin(240, 144, C_BLACK);
-    lit = ms > 1300u || ((ms / 70u) * 2654435761u >> 29) > 4u;
-    if (ms > 500u)
-        draw_kanji(101, 4, 3, ms > 900u ? C_MAG : RGB(80, 20, 60));
-    neon_text(120, 50, &APP_BIG_FONT, "OFFWORLD", ms > 400u && lit);
-    if (ms > 1600u)
-        ctext(120, 92, &FONT_XS, "by swtdr34mz", RGB(150, 150, 170));
-    if (ms > 300u) {
-        uint32_t i, w = ms > 1800u ? 240u : (ms - 300u) * 240u / 1500u;
-        for (i = 0; i < 6u; i++)
-            cv_rect(120 - (int32_t)w / 2, 120 + (int32_t)i, (int32_t)w, 1, mix565(RGB(150, 64, 36), C_BLACK, i * 40u));
-    }
-    cv_blit(0, 48);
+    intro_band(0, 144, ms);
+    intro_band(144, 96, ms);
 }
 
 /* ------------------------------------------------------------- the contract --- */
@@ -1676,7 +1794,7 @@ void app_overload(void) { eng_shed(); }
 void app_splash(void)
 {
     lcd_fill(0, 0, 240, 240, C_BLACK);
-    draw_intro(2000u);
+    draw_intro(INTRO_MS - 200u);
 }
 
 void app_ui_init(void)
@@ -1724,11 +1842,25 @@ void app_frame(void)
         ann_say(t, 0, ANN_NOW);
     }
     ann_tick(now);
-    if (set_dirty && now - dirty_at > 4000u)
-        settings_save();
+    /* the settings to the flash: a write stops the sound for a moment (a click while it plays), so only in a quiet
+     * moment (no note, no cue, no MEMORY), faded out first; the room and the rain come back a moment later */
+    if (set_dirty && now - dirty_at > 3000u && eng_voices() == 0 && !ui.memory && !ui.cue_cur) {
+        if (!ui.ducking) {
+            eng_duck(1);
+            ui.ducking = 1;
+            ui.duck_t = now;
+        } else if (eng_ducked() || now - ui.duck_t > 300u) {
+            settings_save();
+            eng_duck(0);
+            ui.ducking = 0;
+        }
+    } else if (ui.ducking) {
+        eng_duck(0);
+        ui.ducking = 0;
+    }
     if (ui.intro) {
         uint32_t ms = now - ui.intro_t0;
-        if (ui.intro == 1 && ms < 2800u) {
+        if (ui.intro == 1 && ms < INTRO_MS) {
             if (now - ui.scene_at >= 33u) {
                 ui.scene_at = now;
                 draw_intro(ms);

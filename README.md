@@ -11,6 +11,12 @@ slowly and it stops for a few detents on each one, whose name lights up.
 
 ![OFFWORLD](site/img/screen-main.png) ![The title](site/img/screen-splash.png)
 
+## Version 0.4.1: no clicks, a new intro
+
+- Settings are written to the flash only in a quiet moment (no note, no cue, no MEMORY), faded out first: a write stops the FM-1's sound for a moment, which was the click a few seconds after changing a preset or a knob.
+- Every value that changes a chunk at a time now glides sample by sample (the filter in a fast attack, pressure); the limiter turns down over ~2 ms instead of at once; rain drops and thunder are soft, the neon hums instead of crackling; the delay rounds off instead of clipping.
+- The intro: a terminal boots, the city rises out of the dark in the rain, searchlights, a car, the title buzzing on letter by letter, lightning, the name.
+
 ## Version 0.4: the world, the night, cues, memory
 
 - **WORLD** (FX): what the screen shows, heard. Each scene has its own sound (traffic far below, a crowd at the noodle bar, wind, a hologram's hum, the plant, TV static, buzzing neon), and what happens in it sounds: a car flying past (moving from side to side with it), a sign crackling, a flame roaring, a siren far off, a bowl set down. CITY sets its level.

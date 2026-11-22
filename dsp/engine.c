@@ -218,7 +218,7 @@ static void params_glide(void)
     const float a = 0.14f;
     prm_t c = T;
 #define G(f) c.f = P.f + (T.f - P.f) * a
-    G(pw); G(o2_lvl); G(sub); G(cut_hz); G(env_oct); G(res_k); G(bright); G(det_c); G(rnd_c); G(ens); G(spread);
+    G(o2_semi); G(pw); G(o2_lvl); G(sub); G(cut_hz); G(env_oct); G(res_k); G(bright); G(det_c); G(rnd_c); G(ens); G(spread);
     G(wow_c); G(drive); G(size); G(t60); G(wet); G(damp_k); G(dsend); G(dfb); G(hiss); G(rumble); G(tone_mul);
     G(vib_c); G(pamt);
 #undef G
@@ -239,6 +239,8 @@ typedef struct {
     float press, ptarget;                /* the key's pressure, gliding to ptarget */
     float pt, kg;                        /* GLIDE: the pitch it heads for, how fast (a share a chunk; 1 at once) */
     uint8_t steal;                       /* taken for a new note: fading out fast, then the pending note starts */
+    float c_prev[6], vg_prev;            /* last chunk's filter coefficients and level: the samples glide from them */
+    uint8_t c_ok;
     int pend_id;
     float pend_pitch, pend_vel, pend_from, pend_kg;
     uint32_t rng;                        /* its own noise (a voice may run on the second core) */
@@ -330,6 +332,7 @@ void eng_press(int id, float p)
 }
 
 static uint32_t notes, thunders;
+static volatile uint8_t duck_on;
 
 static float kglide(float g) { return g <= 0.0005f ? 1.0f : kchunk(g / 3.0f); }   /* there in about g seconds */
 
@@ -347,6 +350,7 @@ static void fresh(voice_t *v, int pick)  /* a silent voice: from zero, its phase
         v->rng = 0x9E3779B9u * (uint32_t)(pick + 1);
     v->ea = v->ea_prev = v->ef = 0.0f;
     v->a1 = v->b1 = v->a2 = v->b2 = 0.0f;
+    v->c_ok = 0;
     v->p1 = vrand(v);
     v->p2 = vrand(v);
     v->ps = 0.0f;
@@ -459,7 +463,7 @@ static struct {
     /* a car flying past: where it is (0..1), how fast, from which side */
     float fly_t, fly_dt, fly_dir, fly_bp1, fly_bp2, fly_ph;
     /* a sign's crackle, a flame, a siren, a bowl */
-    float zap_e, flame_e, flame_lp, flame_atk, siren_t, siren_dt, siren_pan, siren_ph, clink_e, clink_ph, clink_inc, clink_pan;
+    float zap_e, zap_ph, zap_lp, flame_e, flame_lp, flame_atk, siren_t, siren_dt, siren_pan, siren_ph, clink_e, clink_ph, clink_inc, clink_pan;
     /* MEMORY */
     uint32_t mem_w;
     uint8_t mem_on, mem_half;
@@ -571,10 +575,16 @@ static inline void world_sample(float *l, float *r, float *send)
             W.fly_dt = 0.0f;
     }
     if (W.zap_e > 0.001f) {              /* a tube crackling */
-        float z = (rndu() < 0.25f ? white() : 0.0f) * W.zap_e * 0.07f * W.level;
+        float z;
+        W.zap_ph += 120.0f / SR;
+        if (W.zap_ph >= 1.0f)
+            W.zap_ph -= 1.0f;
+        z = (W.zap_ph < 0.5f ? 1.0f : -1.0f);   /* a tube's hum, filtered round */
+        W.zap_lp += 0.02f * (z - W.zap_lp);
+        z = W.zap_lp * fm_sin_turns(W.zap_e * 0.5f) * 0.03f * W.level;
         yl += z;
         yr += z * 0.6f;
-        W.zap_e *= 0.99985f;
+        W.zap_e *= 0.99992f;
     }
     if (W.flame_e > 0.0f) {              /* a flame shooting up: a roar that opens and dies */
         float n = white(), f;
@@ -770,12 +780,12 @@ static struct {
     uint32_t ap_off[4], ap_w[4];
     /* rain */
     float hl_lp, hl_hp, hr_lp, hr_hp, r1, r2;
-    float drop_e[3], drop_pan[3], drop_hp[3];
-    float th_e, th_atk, th_lp1, th_lp2, th_crk;
+    float drop_e[3], drop_to[3], drop_pan[3], drop_hp[3], drop_lp[3];
+    float th_e, th_atk, th_lp1, th_lp2, th_crk, th_c1;
     uint8_t th_on;
     /* the rest */
     float lfo, wow1, wow2;
-    float level, gain_s, lim_env, gr_min;
+    float level, gain_s, lim_env, gr_min, duck;
 } E;
 
 void eng_init(void)
@@ -803,6 +813,7 @@ void eng_init(void)
     }
     q_w = q_r = 0;
     E.gr_min = 1.0f;
+    E.duck = 1.0f;
     eng_sound(0, PRESETS[0].m, 0.0f, 0.3f, PRESS_FILTER, 0.7f);
     params_take();
     P = T;
@@ -885,9 +896,25 @@ static void voice_chunk(voice_t *v, int slot, float *L, float *R, float lfo, flo
     gr = 1.0f + (pan < 0.0f ? pan : 0.0f) * 0.75f;
     vamp = 0.13f * (0.55f + 0.45f * v->vel) * p_amp;
     drv = P.drive + p_drv;
-    dea = (ea1 - ea0) * (1.0f / (float)CH);
-    for (s = 0; s < CH; s++) {
-        float o, x, v1, v2, v3, y, amp = ea0 + dea * (float)(s + 1u);
+    /* every value that changes a chunk at a time glides across the chunk, sample by sample: the filter's
+     * coefficients (a fast brass attack moves the cutoff octaves in a few ms) and the level (pressure) */
+    {
+        float cn[6], d[6], c0[6], vg0 = v->c_ok ? v->vg_prev : vamp, dvg;
+        uint32_t q;
+        cn[0] = a1a; cn[1] = a2a; cn[2] = a3a; cn[3] = a1b; cn[4] = a2b; cn[5] = a3b;
+        for (q = 0; q < 6u; q++) {
+            c0[q] = v->c_ok ? v->c_prev[q] : cn[q];
+            d[q] = (cn[q] - c0[q]) * (1.0f / (float)CH);
+            v->c_prev[q] = cn[q];
+        }
+        v->c_ok = 1;
+        dvg = (vamp - vg0) * (1.0f / (float)CH);
+        v->vg_prev = vamp;
+        a1a = c0[0]; a2a = c0[1]; a3a = c0[2]; a1b = c0[3]; a2b = c0[4]; a3b = c0[5];
+        dea = (ea1 - ea0) * (1.0f / (float)CH);
+        for (s = 0; s < CH; s++) {
+        float o, x, v1, v2, v3, y, amp = (ea0 + dea * (float)(s + 1u)) * (vg0 + dvg * (float)(s + 1u));
+        a1a += d[0]; a2a += d[1]; a3a += d[2]; a1b += d[3]; a2b += d[4]; a3b += d[5];
         o = saw(v->p1, i1);
         o += P.o2_lvl * (P.o2_pulse ? 0.5f * pulse(v->p2, i2, P.pw) : saw(v->p2, i2));
         {                                /* the sub: a parabola, near enough to a sine an octave down */
@@ -919,9 +946,10 @@ static void voice_chunk(voice_t *v, int slot, float *L, float *R, float lfo, flo
         y = v2;
         if (drv > 1.001f)
             y = fm_tanhf(y * drv) / drv * 1.4f;
-        y *= amp * vamp;
+        y *= amp;
         L[s] += y * gl;
         R[s] += y * gr;
+        }
     }
     v->a1 = flush_dn(v->a1);
     v->b1 = flush_dn(v->b1);
@@ -1117,18 +1145,27 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
                 if (rndu() < P.drop_p) {
                     for (i = 0; i < 3u; i++)
                         if (E.drop_e[i] < 0.02f) {
-                            E.drop_e[i] = (0.3f + 0.7f * rndu()) * P.hiss * 7.0f;
+                            E.drop_e[i] = 0.0f;
+                            E.drop_to[i] = (0.3f + 0.7f * rndu()) * P.hiss * 5.0f;
                             E.drop_pan[i] = rndu();
                             break;
                         }
                 }
-                for (i = 0; i < 3u; i++)
-                    if (E.drop_e[i] > 0.0005f) {
-                        float d = white() * E.drop_e[i], hp = d - E.drop_hp[i];
-                        E.drop_hp[i] += 0.3f * (d - E.drop_hp[i]);
-                        rain_l += hp * (1.0f - E.drop_pan[i]);
-                        rain_r += hp * E.drop_pan[i];
-                        E.drop_e[i] *= 0.9935f;
+                for (i = 0; i < 3u; i++)   /* a drop: rises in ~1 ms, a soft band of noise, gone in ~5 ms */
+                    if (E.drop_to[i] > 0.0f || E.drop_e[i] > 0.0005f) {
+                        float d, bp;
+                        if (E.drop_to[i] > 0.0f) {
+                            E.drop_e[i] += (E.drop_to[i] - E.drop_e[i]) * 0.05f;
+                            if (E.drop_e[i] > E.drop_to[i] * 0.9f)
+                                E.drop_to[i] = 0.0f;
+                        } else
+                            E.drop_e[i] *= 0.9955f;
+                        d = white() * E.drop_e[i];
+                        E.drop_hp[i] += 0.35f * (d - E.drop_hp[i]);
+                        E.drop_lp[i] += 0.08f * (E.drop_hp[i] - E.drop_lp[i]);
+                        bp = E.drop_hp[i] - E.drop_lp[i];
+                        rain_l += bp * (1.0f - E.drop_pan[i]);
+                        rain_r += bp * E.drop_pan[i];
                     }
                 E.r1 += 0.006f * (white() - E.r1);
                 E.r2 += 0.006f * (E.r1 - E.r2);
@@ -1147,8 +1184,8 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
                     E.th_lp2 += 0.012f * (E.th_lp1 - E.th_lp2);
                     tn = E.th_lp2 * 9.0f * E.th_e;
                     if (E.th_crk > 0.01f) {
-                        if (rndu() < 0.004f)
-                            tn += white() * E.th_crk * 0.5f;
+                        E.th_c1 += 0.2f * (white() - E.th_c1);
+                        tn += E.th_c1 * E.th_crk * 0.4f * (0.5f + 0.5f * fm_sin_turns(E.th_atk * 3.0f - (float)(int)(E.th_atk * 3.0f)));
                         E.th_crk *= 0.99996f;
                     }
                     rum += tn * 0.35f;
@@ -1167,8 +1204,8 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
             E.dl_lpr += 0.25f * (rdr - E.dl_lpr);
             {
                 float in = 0.5f * (l + r) * dsend, a = (in + dfb * E.dl_lpr) * 16384.0f, b = dfb * E.dl_lpl * 16384.0f;
-                dl_l[E.dl_wl] = (int16_t)fm_clampf(a, -32767.0f, 32767.0f);
-                dl_r[E.dl_wr] = (int16_t)fm_clampf(b, -32767.0f, 32767.0f);
+                dl_l[E.dl_wl] = (int16_t)(fm_tanhf(a * (1.0f / 32768.0f)) * 32767.0f);
+                dl_r[E.dl_wr] = (int16_t)(fm_tanhf(b * (1.0f / 32768.0f)) * 32767.0f);
             }
             if (++E.dl_wl >= DL_L)
                 E.dl_wl = 0;
@@ -1223,7 +1260,7 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
              * the very top for what slips through */
             {
                 float pk = fm_maxf(fm_fabsf(l), fm_fabsf(r)), g;
-                E.lim_env = pk > E.lim_env ? E.lim_env + (pk - E.lim_env) * 0.25f : E.lim_env * 0.99993f;
+                E.lim_env = pk > E.lim_env ? E.lim_env + (pk - E.lim_env) * 0.01f : E.lim_env * 0.99997f;
                 g = E.lim_env > 0.55f ? 0.55f / E.lim_env : 1.0f;
                 l *= g;
                 r *= g;
@@ -1236,6 +1273,9 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
             }
             lvl = fm_maxf(lvl, fm_fabsf(l) + fm_fabsf(r));
             E.gain_s += (gain - E.gain_s) * 0.004f;
+            E.duck += ((duck_on ? 0.0f : 1.0f) - E.duck) * 0.003f;   /* (a save to the flash: faded out first) */
+            l *= E.duck;
+            r *= E.duck;
             lr[2u * (c0 + s)] = (int32_t)(l * E.gain_s);
             lr[2u * (c0 + s) + 1u] = (int32_t)(r * E.gain_s);
         }
@@ -1253,6 +1293,9 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
         vb_full = 0;
     E.level = lvl * 0.5f > E.level ? lvl * 0.5f : E.level * 0.97f;
 }
+
+void eng_duck(int on) { duck_on = (uint8_t)(on != 0); }
+int eng_ducked(void) { return E.duck < 0.001f; }
 
 int eng_voices(void)
 {
