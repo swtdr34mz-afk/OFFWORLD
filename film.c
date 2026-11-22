@@ -84,7 +84,7 @@ static void grad(int32_t y0, int32_t y1, uint16_t c0, uint16_t c1)   /* a sky: r
 static void sign_glyph(int32_t x, int32_t y, uint32_t h, uint16_t c)
 {
     uint32_t r, i, bits = h & 0x1FFFFFFu;
-    bits |= (h & 0x2000000u) ? 0x1Fu : 0x0084210u;   /* a top bar, or a stem */
+    bits |= ((h >> 25) & 1u) ? 0x1Fu : 0x0084210u;   /* a top bar, or a stem */
     for (r = 0; r < 5u; r++)
         for (i = 0; i < 5u; i++)
             if (bits >> (r * 5u + i) & 1u)
