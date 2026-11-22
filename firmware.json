@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "offworld",
+  "name": "OFFWORLD",
+  "author": "swtdr34mz",
+  "license": "MPL-2.0",
+  "tagline": "A drone synth: colossal 80s brass, endless reverb, rain on neon",
+  "description": "A drone synth in the spirit of 80s sci-fi film scores. Two detuned saws per voice, a brass filter envelope, ensemble chorus, a reverb up to 30 s with FREEZE, synthesized rain and thunder. Four macro knobs on sweetspots (SWELL, DRIFT, SPACE, RAIN), DRONE with a deep root, EPIC, a low split the melody follows in 8 scales, GLIDE, key pressure, CUES that slide into each other, MEMORY. On the screen: eight night-city scenes, a story of one night, lights that follow your notes.",
+  "tags": ["synth", "ambient"],
+  "install": "https://github.com/swtdr34mz-afk/OFFWORLD/releases",
+  "source": "https://github.com/swtdr34mz-afk/OFFWORLD",
+  "screenshot": "site/img/screen-main.png",
+  "hardware": {
+    "models": ["FM-1"],
+    "flash": ["856014", "B36014"],
+    "features": ["usb-audio-in", "usb-audio-out", "second-core", "velocity", "pressure", "screen-reader", "backup"]
+  },
+  "credits": "Built on fm1-base (Charles Vestal) and felucca-bsp (Leo Kuroshita, Hügelton Instruments)."
+}

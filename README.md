@@ -11,6 +11,10 @@ slowly and it stops for a few detents on each one, whose name lights up.
 
 ![OFFWORLD](site/img/screen-main.png) ![The title](site/img/screen-splash.png)
 
+**Manual:** [English](docs/MANUAL.md) ([PDF](docs/OFFWORLD_MANUAL.pdf)) · [Deutsch](docs/HANDBUCH.md) ([PDF](docs/OFFWORLD_HANDBUCH.pdf))
+
+**Install:** download the `.fwsc` from [Releases](https://github.com/swtdr34mz-afk/OFFWORLD/releases) and install it as any FM-1 firmware. Unofficial: not made or supported by M-VAVE; at your own risk.
+
 ## Version 0.4.1: no clicks, a new intro
 
 - Settings are written to the flash only in a quiet moment (no note, no cue, no MEMORY), faded out first: a write stops the FM-1's sound for a moment, which was the click a few seconds after changing a preset or a knob.
