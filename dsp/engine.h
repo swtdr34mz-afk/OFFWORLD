@@ -48,11 +48,15 @@ typedef struct {
 extern const preset_t PRESETS[NPRESETS];
 
 void eng_init(void);
-/* the sound: the preset's timbre, the four macros, TONE -1..1 (the filter darker / brighter), VIBRATO 0..1 */
-void eng_sound(int preset, const uint8_t m[4], float tone, float vib);
+/* what pressing a key harder does */
+enum { PRESS_OFF, PRESS_FILTER, PRESS_SWELL, PRESS_POWER, PRESS_VIBRATO, NPRESS };
+/* the sound: the preset's timbre, the four macros, TONE -1..1 (the filter darker / brighter), VIBRATO 0..1,
+ * PRESSURE (PRESS_*) and its amount 0..1 */
+void eng_sound(int preset, const uint8_t m[4], float tone, float vib, int press, float pamt);
 /* a note: id names it (the same id again strikes it again), pitch in MIDI semitones, velocity 0..1 */
 void eng_note_on(int id, float pitch, float vel);
 void eng_note_off(int id);
+void eng_press(int id, float p);        /* a key's pressure 0..1 */
 void eng_all_off(void);                  /* every note let go (they ring out) */
 void eng_panic(void);                    /* silence now */
 void eng_shed(void);                     /* the render ran late: a voice let go quickly (audio interrupt) */
