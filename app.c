@@ -2,7 +2,7 @@
  * Copyright (C) 2026 swtdr34mz (OFFWORLD) */
 /* OFFWORLD: input, the knobs and their sweetspots, DRONE, EPIC, the low split and the melody that follows it,
  * pressure, the pages, settings. Part of the unity build (device/unity.c, host/plat_host.c), after the platform:
- * gfx.c and announce.c are in scope. The sound is dsp/engine.c, the film on the screen city.inc.
+ * gfx.c and announce.c are in scope. The sound is dsp/engine.c, the film on the screen film.c.
  *
  * Controls (v0.2)
  *   the keys        the brass, with velocity (harder = brighter) and pressure (PRESSURE); OCT- / OCT+ the octave
@@ -1426,7 +1426,7 @@ static void neon_text(int32_t cx, int32_t y, const felucca_font_t *f, const char
     cv_text(x, y, f, s, C_CYAN);
 }
 
-#include "city.inc"                      /* the film: the scenes, the rain, the cuts */
+#include "film.c"                        /* the film: the scenes, the rain, the cuts */
 
 static void world_level(void) { eng_world(film.scene, (float)set.city / 100.0f); }
 
