@@ -23,10 +23,9 @@ const macro_t MACROS[4] = {
 /* name, o2 semitones, o2 pulse, width, o2 level, sub, cutoff, envelope octaves, resonance, velocity, macros */
 const preset_t PRESETS[NPRESETS] = {
     {"OFFWORLD BRASS", 0.0f, 0, 0.50f, 1.00f, 0.35f, 260.0f, 4.6f, 0.20f, 0.60f, {45, 35, 85, 0}},
-    {"RAIN CITY", 0.0f, 1, 0.62f, 0.80f, 0.30f, 380.0f, 3.2f, 0.15f, 0.40f, {75, 70, 85, 70}},
     {"NEON TOWER", 7.0f, 0, 0.50f, 0.60f, 0.20f, 600.0f, 3.6f, 0.25f, 0.70f, {45, 35, 50, 0}},
     {"PYRAMID HALL", 12.0f, 0, 0.50f, 0.55f, 0.30f, 300.0f, 4.0f, 0.10f, 0.50f, {105, 70, 115, 35}},
-    {"LAST SUNRISE", 0.0f, 1, 0.75f, 0.90f, 0.40f, 220.0f, 4.2f, 0.35f, 0.50f, {75, 35, 115, 0}},
+    {"LAST SUNRISE", 19.0f, 0, 0.50f, 0.42f, 0.15f, 650.0f, 2.4f, 0.12f, 0.50f, {105, 70, 50, 35}},
     {"SKYLINE", -12.0f, 0, 0.50f, 0.70f, 0.00f, 900.0f, 3.0f, 0.30f, 0.80f, {12, 70, 50, 35}},
     {"DEEP SECTOR", -12.0f, 1, 0.55f, 0.80f, 0.60f, 140.0f, 3.6f, 0.45f, 0.40f, {105, 105, 85, 105}},
     {"ACID SKY", 0.0f, 0, 0.50f, 0.50f, 0.20f, 180.0f, 5.0f, 0.78f, 0.80f, {45, 35, 85, 35}},
@@ -248,7 +247,7 @@ static voice_t V[ENG_NV];
 static const float PANS[ENG_NV] = {-0.9f, 0.9f, -0.5f, 0.5f, -0.2f, 0.2f, -0.7f, 0.7f};
 
 /* the queue: main loop -> render */
-enum { EV_ON, EV_OFF, EV_ALL_OFF, EV_PANIC, EV_PRESS, EV_MOVE };
+enum { EV_ON, EV_OFF, EV_ALL_OFF, EV_PANIC, EV_PRESS, EV_MOVE, EV_WORLD, EV_SFX, EV_MEM };
 typedef struct {
     uint8_t type, retrig;
     int16_t id, id2;
@@ -307,6 +306,21 @@ void eng_all_off(void)
 void eng_panic(void)
 {
     push(EV_PANIC, 0, 0.0f, 0.0f);
+    commit();
+}
+void eng_world(int scene, float level)
+{
+    push(EV_WORLD, scene, 0.0f, level);
+    commit();
+}
+void eng_sfx(int type, float a, float b)
+{
+    push(EV_SFX, type, a, b);
+    commit();
+}
+void eng_memory(int on)
+{
+    push(EV_MEM, on, 0.0f, 0.0f);
     commit();
 }
 void eng_press(int id, float p)
@@ -416,6 +430,231 @@ static void start(int id, float pitch, float vel, float from, float glide_s)
     v->pend_kg = kg;
 }
 
+/* ------------------------------------------------------------------ the world --- */
+/* What the screen shows, heard: a bed of sound for each scene (traffic, a crowd, wind, a hologram's hum, the plant, TV
+ * static, neon buzzing, wind on a roof) and things that happen in it (a car flying past, a sign crackling, a flame, a
+ * siren far off, a bowl set down). All synthesized here, all into the room. The app says which scene and when. */
+typedef struct {
+    float lp_hz, hp_hz, noise, am_rate, am_depth, hum_hz, hum, buzz;
+} bed_t;
+static const bed_t BEDS[NWORLD] = {
+    {420.0f, 60.0f, 0.050f, 0.20f, 0.30f, 0.0f, 0.0f, 0.0f},       /* SKYLINE: traffic far below */
+    {1500.0f, 320.0f, 0.040f, 4.5f, 0.75f, 0.0f, 0.0f, 0.0f},      /* NOODLE ROW: voices, a crowd */
+    {900.0f, 120.0f, 0.075f, 0.15f, 0.50f, 0.0f, 0.0f, 0.0f},      /* NIGHT FLIGHT: the wind */
+    {2500.0f, 600.0f, 0.008f, 6.0f, 0.50f, 220.0f, 0.014f, 0.3f},  /* HOLO KOI: the hologram's hum */
+    {260.0f, 40.0f, 0.065f, 0.10f, 0.40f, 55.0f, 0.018f, 0.5f},    /* REFINERY: the plant */
+    {9000.0f, 2500.0f, 0.020f, 0.0f, 0.0f, 60.0f, 0.008f, 0.6f},   /* TV WALL: static, mains hum */
+    {600.0f, 80.0f, 0.020f, 0.30f, 0.30f, 100.0f, 0.012f, 1.0f},   /* NEON ALLEY: the tubes buzzing */
+    {700.0f, 150.0f, 0.060f, 0.25f, 0.60f, 0.0f, 0.0f, 0.0f},      /* ROOFTOP: wind */
+};
+
+#define MEM_N 66150u                     /* MEMORY: 3 s at 22,050 Hz, 8 bits (square-law) */
+static int8_t mem_buf[MEM_N] PLAT_POOL;
+#define NGRAIN 4
+
+static struct {
+    int scene, want;
+    float level, gain;                   /* the bed: its level (CITY), how far faded in (a scene change: out, in) */
+    float lp_k, hp_k, lp1, lp2, hp1, am_ph, am, am_to, hum_ph;
+    /* a car flying past: where it is (0..1), how fast, from which side */
+    float fly_t, fly_dt, fly_dir, fly_bp1, fly_bp2, fly_ph;
+    /* a sign's crackle, a flame, a siren, a bowl */
+    float zap_e, flame_e, flame_lp, flame_atk, siren_t, siren_dt, siren_pan, siren_ph, clink_e, clink_ph, clink_inc, clink_pan;
+    /* MEMORY */
+    uint32_t mem_w;
+    uint8_t mem_on, mem_half;
+    float mem_g, mem_to;
+    float gpos[NGRAIN], gu[NGRAIN], gdu[NGRAIN], gpan[NGRAIN];
+} W;
+
+static int8_t mem_enc(float x)           /* -2..2 into 8 bits, finer near zero */
+{
+    float a = fm_clampf(fm_fabsf(x) * 0.5f, 0.0f, 1.0f);
+    int32_t q = (int32_t)(fm_sqrtf(a) * 127.0f);
+    return (int8_t)(x < 0.0f ? -q : q);
+}
+static float mem_dec(int8_t q)
+{
+    float a = (float)q * (1.0f / 127.0f);
+    return (a < 0.0f ? -a * a : a * a) * 2.0f;
+}
+
+static void grain_new(int g)
+{
+    W.gpos[g] = rndu() * (float)(MEM_N - 6000u);
+    W.gu[g] = 0.0f;
+    W.gdu[g] = 1.0f / (0.18f * SR * (0.7f + 0.6f * rndu()));   /* 0.13 .. 0.23 s */
+    W.gpan[g] = rndu();
+}
+
+static void world_event(int type, float a, float b)
+{
+    if (type == SFX_FLYBY) {
+        W.fly_t = 0.0f;
+        W.fly_dt = 1.0f / (fm_maxf(b, 0.5f) * SR);
+        W.fly_dir = a < 0.0f ? -1.0f : 1.0f;
+    } else if (type == SFX_ZAP)
+        W.zap_e = 1.0f;
+    else if (type == SFX_FLAME) {
+        W.flame_atk = 0.0f;
+        W.flame_e = 0.001f;
+    } else if (type == SFX_SIREN) {
+        W.siren_t = 0.0001f;
+        W.siren_dt = 1.0f / (7.0f * SR);
+        W.siren_pan = fm_clampf(a, 0.0f, 1.0f);
+    } else if (type == SFX_CLINK) {
+        W.clink_e = 1.0f;
+        W.clink_inc = (2600.0f + 1600.0f * rndu()) / SR;
+        W.clink_pan = rndu();
+    }
+}
+
+static void world_chunk(void)            /* the bed's filters and the scene change, once a chunk */
+{
+    const bed_t *b = &BEDS[(uint32_t)W.scene % NWORLD];
+    float to = W.want != W.scene ? 0.0f : W.level;
+    W.gain += (to - W.gain) * 0.02f;
+    if (W.want != W.scene && W.gain < 0.003f) {
+        W.scene = W.want;
+        b = &BEDS[(uint32_t)W.scene % NWORLD];
+    }
+    W.lp_k = onepole(b->lp_hz);
+    W.hp_k = onepole(b->hp_hz);
+    W.mem_g += (W.mem_to - W.mem_g) * (W.mem_to > W.mem_g ? 0.012f : 0.0035f);
+}
+
+/* the world's sound, a sample: into l / r, and what the room should hear of it into *send */
+static inline void world_sample(float *l, float *r, float *send)
+{
+    const bed_t *b = &BEDS[(uint32_t)W.scene % NWORLD];
+    float x, y = 0.0f, yl = 0.0f, yr = 0.0f, g = W.gain;
+    if (g > 0.0005f) {                   /* the bed: band-limited noise, swelling and falling, and a hum */
+        x = white();
+        W.lp1 += W.lp_k * (x - W.lp1);
+        W.lp2 += W.lp_k * (W.lp1 - W.lp2);
+        W.hp1 += W.hp_k * (W.lp2 - W.hp1);
+        if (b->am_rate > 0.0f) {
+            W.am_ph += b->am_rate / SR;
+            if (W.am_ph >= 1.0f) {
+                W.am_ph -= 1.0f;
+                W.am_to = rndu();
+            }
+            W.am += (W.am_to - W.am) * 0.0006f;
+        } else
+            W.am = 1.0f;
+        y = (W.lp2 - W.hp1) * 2.2f * b->noise * (1.0f - b->am_depth + b->am_depth * W.am);
+        if (b->hum > 0.0f) {
+            float h;
+            W.hum_ph += b->hum_hz / SR;
+            if (W.hum_ph >= 1.0f)
+                W.hum_ph -= 1.0f;
+            h = fm_sin_turns(W.hum_ph);
+            h += b->buzz * (h * h * h * 2.0f - h);   /* buzzier with BUZZ */
+            y += h * b->hum;
+        }
+        y *= g;
+        yl = yr = y;
+    }
+    if (W.fly_dt > 0.0f) {               /* the car: from one side to the other, loudest close, its pitch falling past */
+        float t = W.fly_t, d = 2.0f * t - 1.0f, amp = 1.0f / (1.0f + 10.0f * d * d), pan = 0.5f + 0.5f * d * W.fly_dir;
+        float dop = d < 0.0f ? 1.12f : 0.88f, n = white(), k1 = 0.18f * dop, tone;
+        W.fly_bp1 += k1 * (n - W.fly_bp1);
+        W.fly_bp2 += 0.05f * (W.fly_bp1 - W.fly_bp2);
+        W.fly_ph += 85.0f * dop / SR;
+        if (W.fly_ph >= 1.0f)
+            W.fly_ph -= 1.0f;
+        tone = ((W.fly_bp1 - W.fly_bp2) * 1.6f + 0.35f * fm_sin_turns(W.fly_ph)) * amp * 0.10f * W.level;
+        yl += tone * (1.0f - pan);
+        yr += tone * pan;
+        W.fly_t += W.fly_dt;
+        if (W.fly_t >= 1.0f)
+            W.fly_dt = 0.0f;
+    }
+    if (W.zap_e > 0.001f) {              /* a tube crackling */
+        float z = (rndu() < 0.25f ? white() : 0.0f) * W.zap_e * 0.07f * W.level;
+        yl += z;
+        yr += z * 0.6f;
+        W.zap_e *= 0.99985f;
+    }
+    if (W.flame_e > 0.0f) {              /* a flame shooting up: a roar that opens and dies */
+        float n = white(), f;
+        if (W.flame_atk < 1.0f) {
+            W.flame_atk += 1.0f / (0.15f * SR);
+            W.flame_e = W.flame_atk;
+        } else
+            W.flame_e *= 0.99995f;
+        W.flame_lp += (0.01f + 0.05f * W.flame_e) * (n - W.flame_lp);
+        f = W.flame_lp * 3.0f * W.flame_e * 0.09f * W.level;
+        yl += f;
+        yr += f;
+        if (W.flame_e < 0.001f)
+            W.flame_e = 0.0f;
+    }
+    if (W.siren_t > 0.0f) {              /* a siren far off: two tones wailing, rising and fading */
+        float env = fm_sin_turns(W.siren_t * 0.5f), f = 700.0f + 230.0f * fm_sin_turns(W.siren_t * 2.4f), sg;
+        W.siren_ph += f / SR;
+        if (W.siren_ph >= 1.0f)
+            W.siren_ph -= 1.0f;
+        sg = (fm_sin_turns(W.siren_ph) + 0.2f * fm_sin_turns(W.siren_ph * 2.0f - (float)(int)(W.siren_ph * 2.0f))) * env *
+             0.022f * W.level;
+        yl += sg * (1.0f - W.siren_pan);
+        yr += sg * W.siren_pan;
+        W.siren_t += W.siren_dt;
+        if (W.siren_t >= 1.0f)
+            W.siren_t = 0.0f;
+    }
+    if (W.clink_e > 0.001f) {            /* a bowl set down */
+        float c;
+        W.clink_ph += W.clink_inc;
+        if (W.clink_ph >= 1.0f)
+            W.clink_ph -= 1.0f;
+        c = (fm_sin_turns(W.clink_ph) + 0.4f * fm_sin_turns(W.clink_ph * 2.7f - (float)(int)(W.clink_ph * 2.7f))) *
+            W.clink_e * 0.02f * W.level;
+        yl += c * (1.0f - W.clink_pan);
+        yr += c * W.clink_pan;
+        W.clink_e *= 0.99965f;
+    }
+    *l += yl;
+    *r += yr;
+    *send = 0.5f * (yl + yr);
+}
+
+/* MEMORY: recording what plays (when frozen: not); the frozen seconds played back as a cloud of grains */
+static inline void memory_sample(float in, float *l, float *r, float *send)
+{
+    uint32_t g;
+    float sl = 0.0f, sr = 0.0f;
+    if (!W.mem_on) {
+        W.mem_half ^= 1u;                /* every other sample: 22,050 Hz */
+        if (W.mem_half) {
+            mem_buf[W.mem_w] = mem_enc(in);
+            if (++W.mem_w >= MEM_N)
+                W.mem_w = 0;
+        }
+    }
+    if (W.mem_g < 0.0005f)
+        return;
+    for (g = 0; g < NGRAIN; g++) {
+        float u = W.gu[g], w = 4.0f * u * (1.0f - u), at = W.gpos[g] + u * 0.18f * SR * 0.5f, fr, x;
+        uint32_t i0 = (uint32_t)at, i1;
+        if (i0 >= MEM_N)
+            i0 -= MEM_N;
+        i1 = i0 + 1u >= MEM_N ? 0u : i0 + 1u;
+        fr = at - (float)(uint32_t)at;
+        x = (mem_dec(mem_buf[i0]) * (1.0f - fr) + mem_dec(mem_buf[i1]) * fr) * w * w;
+        sl += x * (1.0f - W.gpan[g]);
+        sr += x * W.gpan[g];
+        W.gu[g] += W.gdu[g];
+        if (W.gu[g] >= 1.0f)
+            grain_new((int)g);
+    }
+    sl *= W.mem_g * 0.9f;
+    sr *= W.mem_g * 0.9f;
+    *l += sl;
+    *r += sr;
+    *send += 0.5f * (sl + sr);
+}
+
 static void events(void)
 {
     while (q_r != q_w) {
@@ -459,6 +698,24 @@ static void events(void)
                     }
                     V[i].rel = 1;
                 }
+        } else if (e.type == EV_WORLD) {
+            W.want = e.id;
+            W.level = fm_clampf(e.vel, 0.0f, 1.0f);
+        } else if (e.type == EV_SFX) {
+            world_event(e.id, e.pitch, e.vel);
+        } else if (e.type == EV_MEM) {
+            if (e.id && !W.mem_on) {
+                int g;
+                W.mem_on = 1;
+                for (g = 0; g < NGRAIN; g++) {
+                    grain_new(g);
+                    W.gu[g] = (float)g / (float)NGRAIN;
+                }
+                W.mem_to = 1.0f;
+            } else if (!e.id) {
+                W.mem_to = 0.0f;
+                W.mem_on = 0;    /* (it records again; the cloud fades over ~2 s) */
+            }
         } else if (e.type == EV_PRESS) {
             for (i = 0; i < ENG_NV; i++)
                 if (V[i].on && V[i].id == e.id)
@@ -531,6 +788,8 @@ void eng_init(void)
     zero(dl_r, sizeof dl_r);
     zero(rv_mem, sizeof rv_mem);
     zero(ap_buf, sizeof ap_buf);
+    zero(mem_buf, sizeof mem_buf);
+    zero(&W, sizeof W);
     for (i = 0; i < 8u; i++) {
         E.rv_off[i] = off;
         E.rv_max[i] = (uint32_t)((float)RV_BASE[i] * RV_MAXF) + 8u;
@@ -773,6 +1032,7 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
     for (c0 = 0; c0 < n; c0 += CH) {
         float L[CH], R[CH], ensd[3], rv_mod[8], dsend = P.dsend, dfb = P.dfb, wet = P.wet;
         uint32_t m = n - c0 < CH ? n - c0 : CH;
+        world_chunk();
         for (s = 0; s < m; s++) {
             L[s] = vb_l[rd][c0 + s];
             R[s] = vb_r[rd][c0 + s];
@@ -817,7 +1077,7 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
             thunders++;
         }
         for (s = 0; s < m; s++) {
-            float l = L[s], r = R[s], mono, t0, t1, t2, rain_l, rain_r, x, y[8], sum, wl, wr, rdl, rdr;
+            float msend, wsend, l = L[s], r = R[s], mono, t0, t1, t2, rain_l, rain_r, x, y[8], sum, wl, wr, rdl, rdr;
             /* the ensemble */
             mono = 0.5f * (l + r);
             ens_buf[E.ens_w] = mono;
@@ -841,6 +1101,9 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
                 E.ens_w = 0;
             l = l * (1.0f - 0.4f * ens) + ens * (t0 + 0.5f * t1) * 0.8f;
             r = r * (1.0f - 0.4f * ens) + ens * (t2 + 0.5f * t1) * 0.8f;
+            /* MEMORY: what plays recorded; frozen, its cloud */
+            msend = 0.0f;
+            memory_sample(0.5f * (l + r), &l, &r, &msend);
             /* the rain: hiss (a band of noise each side), drops (ticks, here and there), the city's rumble, thunder */
             rain_l = rain_r = 0.0f;
             if (P.hiss > 0.0f || E.th_on) {
@@ -895,6 +1158,8 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
             }
             l += rain_l;
             r += rain_r;
+            /* the world: the scene's sound */
+            world_sample(&l, &r, &wsend);
             /* the delay: ping-pong, each repeat darker */
             rdl = (float)dl_l[E.dl_wl] * (1.0f / 16384.0f);
             rdr = (float)dl_r[E.dl_wr] * (1.0f / 16384.0f);
@@ -913,7 +1178,7 @@ void eng_render(int32_t *lr, uint32_t n, float gain)
             r += 0.8f * E.dl_lpr;
             /* the reverb: the input diffused (four all-passes), then eight lines mixed by a Householder matrix, each
              * damped; FREEZE: no input, no loss */
-            x = P.freeze ? 0.0f : (0.5f * (l + r) * 0.6f + 0.35f * (rain_l + rain_r));
+            x = P.freeze ? 0.0f : (0.5f * (l + r) * 0.6f + 0.35f * (rain_l + rain_r) + 0.5f * wsend + 0.4f * msend);
             for (i = 0; i < 4u; i++) {
                 float *b = ap_buf + E.ap_off[i], d = b[E.ap_w[i]], vv = x - 0.62f * d;
                 b[E.ap_w[i]] = vv;

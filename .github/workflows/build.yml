@@ -39,6 +39,7 @@ jobs:
           build/host/offworld_host tests/basic.txt build/host
           build/host/offworld_host tests/split.txt build/host
           build/host/offworld_host tests/glide.txt build/host
+          build/host/offworld_host tests/world.txt build/host
 
       - name: JieLi toolchain
         run: fm1-base/tools/get_toolchain.sh "$HOME/.jieli"

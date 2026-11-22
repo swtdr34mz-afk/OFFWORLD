@@ -65,7 +65,7 @@ shot freeze.png
 turn PRESET 1
 wait 100
 expect preset 1
-expect m1 75
+expect m1 45
 shot preset.png
 turn PRESET -1
 wait 100

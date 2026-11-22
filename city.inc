@@ -13,10 +13,41 @@ static const char *const SCENE_NAME[NSCENE] = {
     "OUTSKIRTS // REFINERY", "MARKET // TV WALL",     "BACKSTREET // NEON ALLEY", "ROOFTOP // SEARCHLIGHTS",
 };
 
+/* the little stories: a line now and then, typed after the place (our own; none from any film) */
+static const char *const LOGS[] = {
+    "RAIN FOR 41 DAYS NOW.",
+    "SIGNAL LOST. TRYING AGAIN.",
+    "THE NOODLE MAN KNOWS MY ORDER.",
+    "NO STARS TONIGHT. NEVER STARS.",
+    "SOMEONE LEFT A LIGHT ON FOR ME.",
+    "THE KOI SWIMS. NOBODY LOOKS UP.",
+    "MEMORY FILE 7 OF 12: DAMAGED.",
+    "THE SHUTTLE IS LATE AGAIN.",
+    "I DREAMED OF A REAL SUNRISE.",
+    "THE CITY HUMS IN B FLAT.",
+    "ALL THE CLOCKS SAY 3 A.M.",
+    "A PHONE RINGS IN AN EMPTY ROOM.",
+    "THE SNOW ON CHANNEL 9 IS WARM.",
+    "WHO PAINTED THE SKY ORANGE?",
+    "FOUND A PHOTO. NOBODY I KNOW.",
+    "THE ELEVATOR ONLY GOES UP.",
+    "THE NEON SPELLS A NAME I FORGOT.",
+    "SIRENS. NOT FOR ME. NOT TONIGHT.",
+    "THE RAIN TASTES OF IRON.",
+    "LEVEL 0 NEVER SLEEPS.",
+    "THE LAST TRAIN LEFT WITHOUT ME.",
+    "MY HANDS REMEMBER THIS CHORD.",
+    "THE WIND KNOWS EVERY ROOFTOP.",
+    "STATIC ON EVERY CHANNEL. PEACEFUL.",
+};
+#define NLOGS (sizeof LOGS / sizeof LOGS[0])
+
 #define NDROPS 90
 #define GROUND 108
 static struct {
     uint8_t scene, glitch, flicker, flash, car_on;
+    uint8_t burst;                       /* REFINERY: a flame shooting up (frames) */
+    int8_t log;                          /* the line typed under the place (-1: none) */
     uint32_t frame, cut_frame, cut_at, len;
     float sx;                            /* the camera's pan, in pixels */
     float blimp_x, car_x, car_y, car_v;
@@ -378,7 +409,8 @@ static void ref_plant(int32_t x, int32_t i, uint32_t h)
             cv_rect(x + 13, 86, 3, 2, mix565(RGB(90, 30, 10), RGB(255, 200, 80), l));
     } else if (kind == 1u) {             /* a stack and its flame: higher when it's loud */
         int32_t hh = 50 + (int32_t)((h >> 4) % 30u), top = 104 - hh;
-        int32_t fh = 4 + (int32_t)(urand() % 5u) + (int32_t)(lvl01() * 26.0f) + (int32_t)(l / 20u);
+        int32_t fh = 4 + (int32_t)(urand() % 5u) + (int32_t)(lvl01() * 26.0f) + (int32_t)(l / 20u) +
+                     (film.burst && (h & 1u) ? (int32_t)film.burst : 0);
         cv_rect(x + 10, top, 6, hh, dk);
         cv_rect(x + 11, top - fh, 4, fh, C_FIRE);
         cv_rect(x + 12, top - fh * 2 / 3, 2, fh * 2 / 3, RGB(255, 220, 90));
@@ -589,15 +621,18 @@ static void px_dim_row(int32_t y)        /* a scanline: the row at three quarter
     }
 }
 
-static void px_flash(int32_t y1, uint32_t t)   /* the sky lit by lightning */
+static uint16_t px_tc = RGB(200, 190, 240);
+static void px_tint(int32_t y1, uint32_t t, uint16_t c)   /* the sky: lit by lightning, or by dusk and dawn */
 {
     int32_t y, x;
     for (y = 0; y < y1; y++) {
         uint16_t *row = cv_px + (uint32_t)y * 240u;
+        uint32_t ty = t * (uint32_t)(y1 - y / 2) / (uint32_t)y1;   /* (stronger at the top) */
         for (x = 0; x < 240; x++)
-            row[x] = swap16(mix565(swap16(row[x]), RGB(200, 190, 240), t));
+            row[x] = swap16(mix565(swap16(row[x]), c, ty));
     }
 }
+static void px_flash(int32_t y1, uint32_t t) { px_tint(y1, t, px_tc); }
 
 static void film_cut(uint32_t now)       /* to another scene, at random */
 {
@@ -615,12 +650,15 @@ static void film_cut(uint32_t now)       /* to another scene, at random */
     film.len = 18000u + urand() % 17000u;
     film.glitch = film.frame ? 9 : 0;
     film.car_on = 0;
+    film.log = (int8_t)(set.logs && film.frame && urand() % 3u != 0u ? (int32_t)(urand() % NLOGS) : -1);
+    eng_world(film.scene, (float)set.city / 100.0f);
 }
 
 static void film_init(void)
 {
     uint32_t i;
     film.frame = 0;
+    film.log = -1;
     for (i = 0; i < NDROPS; i++) {
         film.drop_x[i] = (float)(urand() % 250u);
         film.drop_y[i] = (float)(urand() % 120u);
@@ -655,7 +693,21 @@ static void film_step(void)              /* the movement, a frame */
         film.car_v = film.scene == SC_TVWALL ? -1.8f : (urand() & 1u) ? 2.6f : -2.6f;
         film.car_x = film.car_v > 0.0f ? -10.0f : 260.0f;
         film.car_y = (float)(24u + urand() % 34u);
+        if (film.scene == SC_CITY || film.scene == SC_KOI || film.scene == SC_ROOFTOP)   /* heard flying past */
+            eng_sfx(SFX_FLYBY, film.car_v > 0.0f ? 1.0f : -1.0f, 270.0f / (2.6f * 25.0f));
     }
+    if (film.scene == SC_REFINERY) {     /* a flame shoots up, roaring */
+        if (film.burst)
+            film.burst--;
+        else if (urand() % 150u == 0u) {
+            film.burst = 30;
+            eng_sfx(SFX_FLAME, 0.0f, 0.0f);
+        }
+    }
+    if ((film.scene == SC_ROOFTOP || film.scene == SC_CITY) && urand() % 600u == 0u)   /* a siren, far off */
+        eng_sfx(SFX_SIREN, (float)(urand() % 100u) / 100.0f, 0.0f);
+    if (film.scene == SC_STREET && urand() % 70u == 0u)   /* a bowl set down at the counter */
+        eng_sfx(SFX_CLINK, 0.0f, 0.0f);
     film.notes_seen = nn;
     if (film.car_on) {
         film.car_x += film.car_v;
@@ -675,8 +727,11 @@ static void film_step(void)              /* the movement, a frame */
         film.flash--;
     if (film.flicker)
         film.flicker--;
-    else if (urand() % 240u == 0u)
+    else if (urand() % 240u == 0u) {
         film.flicker = (uint8_t)(6u + urand() % 10u);
+        if (film.scene == SC_ALLEY || film.scene == SC_STREET || film.scene == SC_CITY)   /* the tube crackles */
+            eng_sfx(SFX_ZAP, 0.0f, 0.0f);
+    }
     film.frame++;
 }
 
@@ -704,6 +759,20 @@ static void film_frame(uint32_t now)
     case SC_ALLEY: scene_alley(); break;
     default: scene_rooftop(); break;
     }
+    if (set.story) {                     /* the night's light: dusk purple, dawn warm, the hours between as they are */
+        int32_t mn = night_min();
+        uint32_t tint = 0;
+        uint16_t tc = 0;
+        if (mn < 120) {
+            tint = (uint32_t)(120 - mn) * 90u / 120u;
+            tc = RGB(170, 70, 120);
+        } else if (mn > 600) {
+            tint = (uint32_t)(mn - 600) * 120u / 120u;
+            tc = RGB(255, 160, 90);
+        }
+        if (tint && film.scene != SC_TVWALL)
+            px_tint(film.scene == SC_STREET || film.scene == SC_ALLEY ? 30 : 80, tint, tc);
+    }
     for (i = 0; i < rain_n; i++) {       /* the rain */
         int32_t dx = (int32_t)film.drop_x[i], dy = (int32_t)film.drop_y[i], len = 4 + (int32_t)(film.drop_v[i] * 0.6f);
         if (dy + len >= 119) {
@@ -730,6 +799,29 @@ static void film_frame(uint32_t now)
             if ((film.frame & 4u) || since > 70u)
                 cv_rect(5 + text_w(&FONT_XS, t), 4, 5, 10, C_CYAN);
         }
+    }
+    if (film.log >= 0 && since >= 40u && since < 190u) {   /* the log line, typed after the place */
+        char t[40];
+        uint32_t n = (since - 40u) / 2u, k;
+        for (k = 0; k < 39u && LOGS[film.log][k] && k < n; k++)
+            t[k] = LOGS[film.log][k];
+        t[k] = 0;
+        if (k) {
+            cv_rect(2, 17, text_w(&FONT_XS, t) + 8, 14, RGB(4, 4, 10));
+            cv_text(5, 18, &FONT_XS, t, C_AMBER);
+        }
+    }
+    if (set.story) {                     /* the night's clock */
+        int32_t mn = night_min(), h = (19 + mn / 60) % 24, mi = mn % 60;
+        char t[6];
+        t[0] = (char)('0' + h / 10);
+        t[1] = (char)('0' + h % 10);
+        t[2] = (film.frame & 16u) ? ':' : ' ';
+        t[3] = (char)('0' + mi / 10);
+        t[4] = (char)('0' + mi % 10);
+        t[5] = 0;
+        cv_rect(203, 2, 35, 14, RGB(4, 4, 10));
+        cv_text(206, 3, &FONT_XS, t, mn > 600 ? C_AMBER : C_MAG);
     }
     for (y = (int32_t)(film.frame & 3u); y < 120; y += 4)   /* scanlines, rolling slowly */
         px_dim_row(y);

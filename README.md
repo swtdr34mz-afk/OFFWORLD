@@ -11,6 +11,17 @@ slowly and it stops for a few detents on each one, whose name lights up.
 
 ![OFFWORLD](site/img/screen-main.png) ![The title](site/img/screen-splash.png)
 
+## Version 0.4: the world, the night, cues, memory
+
+- **WORLD** (FX): what the screen shows, heard. Each scene has its own sound (traffic far below, a crowd at the noodle bar, wind, a hologram's hum, the plant, TV static, buzzing neon), and what happens in it sounds: a car flying past (moving from side to side with it), a sign crackling, a flame roaring, a siren far off, a bowl set down. CITY sets its level.
+- **STORY**: a night told over 24 minutes, 19:00 to 07:00, with a clock in the corner. Dusk, the night, rain, the storm at one, the storm passing, dawn. RAIN is how wild the night gets at most. TIME moves the clock.
+- **LOGS**: now and then a short line typed after the place (our own lines).
+- **CUES** (ENV): SAVE keeps what sounds as a cue (up to 8). CUE plays one, sliding into it over FADE; AUTO moves through them every HOLD seconds. SAVE held 1 s on the page: every cue cleared.
+- **MEMORY** (REC tapped): the last 3 seconds frozen into a cloud you play over; again: it fades.
+- **The controls, drawn**: HOME twice.
+- The keys show the scale with FOLLOW: its notes half lit, the root bright, the low split glowing. FOLLOW turns the split on. EPIC's fifth stays in the scale.
+- RAIN CITY is gone; LAST SUNRISE is a new, brighter sound.
+
 ## Version 0.3: GLIDE, clean at full
 
 - **GLIDE** (EDIT): LOW GLIDE and LOW MODE for the low split, GLIDE and MODE for the right hand (the whole keyboard with the split off). Time from off to 3 s. POLY: every note its own voice, gliding from the last note of its side. MONO: one voice a side, a new key slides it there without a new attack, always gliding. LEGATO: as MONO, gliding only when the notes overlap. With LOW HOLD and MONO the low drone slides from note to note; the DRONE's deep root slides with it.
@@ -35,7 +46,7 @@ slowly and it stops for a few detents on each one, whose name lights up.
 | K3 | **SPACE** | the room's size and decay, its mix and darkness, the delay | ROOM, HALL, CATHEDRAL, CANYON, FREEZE |
 | K4 | **RAIN** | synthesized rain: hiss, drops, the city's rumble; thunder far off at STORM and FLOOD | DRY, DRIZZLE, RAIN, STORM, FLOOD |
 
-Presets: OFFWORLD BRASS, RAIN CITY, NEON TOWER, PYRAMID HALL, LAST SUNRISE, SKYLINE, DEEP SECTOR, ACID SKY. Each
+Presets: OFFWORLD BRASS, NEON TOWER, PYRAMID HALL, LAST SUNRISE, SKYLINE, DEEP SECTOR, ACID SKY. Each
 keeps its own knobs.
 
 ## Controls
@@ -53,6 +64,11 @@ keeps its own knobs.
 | SEL | The SPLIT page: SPLIT, POINT, SCALE, FOLLOW (again: back). Held + a key: the split there |
 | GLO | The PRESSURE page: PRESSURE, AMOUNT, TONE, VIBRATO (again: back) |
 | EDIT | The GLIDE page: LOW GLIDE, LOW MODE, GLIDE, MODE (again: back) |
+| FX | The WORLD page: CITY, STORY, LOGS, TIME |
+| ENV | The CUES page: CUE, FADE, HOLD, AUTO |
+| SAVE | What sounds kept as a cue |
+| REC | MEMORY (held 1 s: every note let go) |
+| HOME twice | The controls, drawn |
 | HOME | Back to the main page |
 | OCT- / OCT+ | The octave |
 | HOME held 1 s | The preset's knobs back as they came |

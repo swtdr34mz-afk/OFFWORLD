@@ -44,7 +44,7 @@ typedef struct {
     float bright;                        /* velocity's share in the opening, 0 .. 1 */
     uint8_t m[4];                        /* the macros it starts at */
 } preset_t;
-#define NPRESETS 8
+#define NPRESETS 7
 extern const preset_t PRESETS[NPRESETS];
 
 void eng_init(void);
@@ -60,6 +60,12 @@ void eng_note_glide(int id, float pitch, float vel, float from, float glide_s);
 /* legato: the voice of old_id becomes id and slides to pitch (retrig: its envelopes start again); none: a new note */
 void eng_note_move(int old_id, int id, float pitch, float vel, float glide_s, int retrig);
 void eng_note_off(int id);
+/* the world: the scene on the screen (its sound: WORLD_*), its level 0..1; things happening in it (SFX_*: a, b below) */
+enum { NWORLD = 8 };
+enum { SFX_FLYBY, SFX_ZAP, SFX_FLAME, SFX_SIREN, SFX_CLINK };   /* FLYBY: a = direction -1 / 1, b = seconds; SIREN: a = pan */
+void eng_world(int scene, float level);
+void eng_sfx(int type, float a, float b);
+void eng_memory(int on);                 /* MEMORY: 1 the last 3 s frozen into a cloud; 0 it fades (and records again) */
 void eng_press(int id, float p);        /* a key's pressure 0..1 */
 void eng_all_off(void);                  /* every note let go (they ring out) */
 void eng_panic(void);                    /* silence now */
