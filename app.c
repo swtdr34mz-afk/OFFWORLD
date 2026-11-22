@@ -811,7 +811,7 @@ static void draw_knob(int k, int32_t x, int32_t y, uint32_t now)
 static void draw_panel(void)
 {
     uint32_t now = plat_ms(), i;
-    char t[40];
+    char t[40], n[8];
     cv_begin(240, 96, C_BLACK);
     cv_rect(0, 0, 240, 1, RGB(60, 20, 60));
     if (now < ui.msg_until) {
@@ -839,9 +839,11 @@ static void draw_panel(void)
     text_cat(t, "VOICES ");
     int_text(eng_voices(), t + 7);
     text_cat(t, "/8  TONE ");
-    signed_text(set.tone, t + strlen(t));
+    signed_text(set.tone, n);
+    text_cat(t, n);
     text_cat(t, "  VIB ");
-    int_text(set.vib, t + strlen(t));
+    int_text(set.vib, n);
+    text_cat(t, n);
     cv_text(6, 80, &FONT_XS, t, RGB(40, 140, 150));
     cv_blit(0, 144);
 }
