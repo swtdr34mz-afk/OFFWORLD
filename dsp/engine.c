@@ -452,7 +452,7 @@ static const bed_t BEDS[NWORLD] = {
     {700.0f, 150.0f, 0.060f, 0.25f, 0.60f, 0.0f, 0.0f, 0.0f},      /* ROOFTOP: wind */
 };
 
-#define MEM_N 66150u                     /* MEMORY: 3 s at 22,050 Hz, 8 bits (square-law) */
+#define MEM_N 66150u                     /* MEMORY: 3 s at 22,050 Hz, 8 bits (mu-law) */
 static int8_t mem_buf[MEM_N] PLAT_POOL;
 #define NGRAIN 4
 
@@ -471,16 +471,37 @@ static struct {
     float gpos[NGRAIN], gu[NGRAIN], gdu[NGRAIN], gpan[NGRAIN];
 } W;
 
-static int8_t mem_enc(float x)           /* -2..2 into 8 bits, finer near zero */
+/* -2..2 into 8 bits: mu-law (mu 255, as the telephone's), rounded: about 37 dB clean at every level from loud down to
+ * -30 dB (the square-law before it: 27 dB at -20 dB, a grain's hiss and crunch) */
+static float mem_tab[256];               /* the decoder: code + 128 -> the sample */
+static int8_t mem_enc(float x)
 {
     float a = fm_clampf(fm_fabsf(x) * 0.5f, 0.0f, 1.0f);
-    int32_t q = (int32_t)(fm_sqrtf(a) * 127.0f);
+    int32_t q = (int32_t)(fm_log2f(1.0f + 255.0f * a) * (127.0f / 8.0f) + 0.5f);
+    if (q > 127)
+        q = 127;
     return (int8_t)(x < 0.0f ? -q : q);
 }
-static float mem_dec(int8_t q)
+#define mem_dec(q) mem_tab[(uint8_t)((int32_t)(q) + 128)]
+static void mem_tab_init(void)
 {
-    float a = (float)q * (1.0f / 127.0f);
-    return (a < 0.0f ? -a * a : a * a) * 2.0f;
+    int32_t i;
+    for (i = -128; i < 128; i++) {
+        int32_t q = i < -127 ? -127 : i;
+        float a = (fm_exp2f((float)(q < 0 ? -q : q) * (8.0f / 127.0f)) - 1.0f) * (2.0f / 255.0f);
+        mem_tab[i + 128] = q < 0 ? -a : a;
+    }
+}
+/* down to 22,050 Hz: a half-band of 15 taps first (stop band -32 dB), so the highs do not fold into the memory */
+static float mem_h[16];
+static uint32_t mem_hw;
+static inline float mem_half_band(void)
+{
+    uint32_t w = mem_hw;
+    return 0.5f * mem_h[(w - 8u) & 15u] + 0.313926f * (mem_h[(w - 7u) & 15u] + mem_h[(w - 9u) & 15u])
+           - 0.093404f * (mem_h[(w - 5u) & 15u] + mem_h[(w - 11u) & 15u])
+           + 0.044110f * (mem_h[(w - 3u) & 15u] + mem_h[(w - 13u) & 15u])
+           - 0.026488f * (mem_h[(w - 1u) & 15u] + mem_h[(w - 15u) & 15u]);
 }
 
 static void grain_new(int g)
@@ -635,9 +656,10 @@ static inline void memory_sample(float in, float *l, float *r, float *send)
     uint32_t g;
     float sl = 0.0f, sr = 0.0f;
     if (!W.mem_on) {
+        mem_h[mem_hw++ & 15u] = in;
         W.mem_half ^= 1u;                /* every other sample: 22,050 Hz */
         if (W.mem_half) {
-            mem_buf[W.mem_w] = mem_enc(in);
+            mem_buf[W.mem_w] = mem_enc(mem_half_band());
             if (++W.mem_w >= MEM_N)
                 W.mem_w = 0;
         }
@@ -800,6 +822,9 @@ void eng_init(void)
     zero(ap_buf, sizeof ap_buf);
     zero(mem_buf, sizeof mem_buf);
     zero(&W, sizeof W);
+    zero(mem_h, sizeof mem_h);
+    mem_hw = 0;
+    mem_tab_init();
     for (i = 0; i < 8u; i++) {
         E.rv_off[i] = off;
         E.rv_max[i] = (uint32_t)((float)RV_BASE[i] * RV_MAXF) + 8u;
