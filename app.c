@@ -1579,7 +1579,7 @@ static void chord_name(const uint8_t *p, uint32_t n, char *out)
 static void note_sign(void)
 {
     uint8_t p[12];
-    uint32_t n = sounding_pitches(p, 12), i, shown = 0, prev = 99;
+    uint32_t n = sounding_pitches(p, 12), i, shown = 0, seen = 0;
     char names[40], chord[16], exact[40];
     int32_t w;
     if (!n)
@@ -1588,13 +1588,13 @@ static void note_sign(void)
     for (i = 0; i < n; i++) {
         uint32_t pc = p[i] % 12u;
         char nt[6];
-        if (shown < 5u && pc != prev && !strstr(names, NOTE_NAME[pc])) {
+        if (shown < 5u && !(seen >> pc & 1u)) {   /* each name once (no libc on the device: a bit a name) */
+            seen |= 1u << pc;
             if (names[0])
                 text_cat(names, " ");
             text_cat(names, NOTE_NAME[pc]);
             shown++;
         }
-        prev = pc;
         if (i < 4u) {
             note_text(p[i], nt);
             if (exact[0])
