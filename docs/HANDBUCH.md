@@ -143,6 +143,13 @@ durchgehend laufen lässt und dann ausschaltet, verliert die letzte Änderung.
 
 Unten stehen die Stimmen (oder Grundton und Skala), **CPU** (Auslastung) und **XR** (zu späte Audioblöcke).
 
+## 13. Noten, Tastatur und Akku auf dem Display
+
+- **Notenschild:** Unten links im Film stehen die Töne, die gerade klingen („A C E“), darunter der Akkord („Am“) und klein die genauen Töne mit Oktave.
+- **Tastatur:** Unten im Panel sind die 27 Tasten des FM-1 abgebildet. Was klingt, leuchtet cyan, der Low Split ist bräunlich. Mit FOLLOW zeigen Punkte die Skala (Amber), der Grundton ist magenta. Spielt eine Taste einen anderen Ton als ihren eigenen, steht dieser Ton auf der Taste.
+- **Akku (Power Cell):** oben rechts, drei Segmente. Fast leer wird sie rot und flackert, die Stadt verliert ihren Strom (Lichter gehen aus, das Bild wird dunkler) und das Terminal meldet „GRID FAILING“. Beim Laden füllt sie sich grün. Am USB ohne Akku: ein Blitz.
+- CPU, XR und der Akku in Prozent stehen auf der Übersicht (HOME zweimal).
+
 ---
 
 OFFWORLD von swtdr34mz · MPL-2.0 · Gebaut auf fm1-base (Charles Vestal) und felucca-bsp (Leo Kuroshita,

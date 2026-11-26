@@ -347,6 +347,13 @@ static struct {
     uint32_t cue_at;
     uint32_t save_t;
     uint8_t ducking;
+    /* the power cell */
+    int8_t batt_lvl;                     /* plat_battery: 0..3, 4 USB, -1 not read */
+    int8_t batt_pct;                     /* 0..100 (from the cell's voltage), -1 unknown */
+    int8_t batt_chg;                     /* plat_battery_charging: 2 charging */
+    uint8_t grid_low;                    /* the cell nearly empty: the city's power failing */
+    uint8_t pmsg;                        /* the power line typed in the film: 0 none, 1 failing, 2 charging */
+    uint32_t pmsg_at, batt_at;
     uint32_t duck_t;
     uint32_t rnd;
 } ui;
@@ -1327,6 +1334,35 @@ static void input(void)
     ui.btn = btn;
 }
 
+/* with FOLLOW: which keys play the scale's root (roots) and which another note of it (marks); else none */
+static void scale_marks(uint32_t *roots, uint32_t *marks)
+{
+    uint32_t k;
+    *roots = *marks = 0;
+    if (split_on() && set.follow != FOLLOW_OFF) {
+        const scale_t *sc = &SCALES[set.scale % NSCALE];
+        for (k = set.split_key; k < NKEYS; k++) {
+            float p;
+            int32_t rel, i, in = 0;
+            if (set.follow == FOLLOW_WHITE) {
+                if (!key_pitch(k, &p))
+                    continue;
+            } else
+                p = 53.0f + (float)k + 12.0f * (float)set.octave;
+            rel = (((int32_t)p - (int32_t)ui.root) % 12 + 12) % 12;
+            for (i = 0; i < sc->n; i++)
+                if (sc->st[i] == rel)
+                    in = 1;
+            if (!in)
+                continue;
+            if (rel == 0)
+                *roots |= 1u << k;
+            else
+                *marks |= 1u << k;
+        }
+    }
+}
+
 static void lights(void)
 {
     uint32_t btn = 0, dimb;
@@ -1356,29 +1392,11 @@ static void lights(void)
            (1u << B_OCTUP) | (1u << B_REC) | (1u << B_HOME);
     {
         /* the keys: what sounds bright; with FOLLOW the scale's keys half lit, its roots bright; the low split glowing */
-        uint32_t lit = ui.sounding | ui.keys, mid = 0, dim = side_mask(SIDE_L), k;
-        if (split_on() && set.follow != FOLLOW_OFF) {
-            const scale_t *sc = &SCALES[set.scale % NSCALE];
-            for (k = set.split_key; k < NKEYS; k++) {
-                float p;
-                int32_t rel, i, in = 0;
-                if (set.follow == FOLLOW_WHITE) {
-                    if (!key_pitch(k, &p))
-                        continue;
-                } else
-                    p = 53.0f + (float)k + 12.0f * (float)set.octave;
-                rel = (((int32_t)p - (int32_t)ui.root) % 12 + 12) % 12;
-                for (i = 0; i < sc->n; i++)
-                    if (sc->st[i] == rel)
-                        in = 1;
-                if (!in)
-                    continue;
-                if (rel == 0)
-                    lit |= 1u << k;
-                else
-                    mid |= 1u << k;
-            }
-        }
+        uint32_t lit = ui.sounding | ui.keys, mid = 0, dim = side_mask(SIDE_L);
+        uint32_t roots, marks;
+        scale_marks(&roots, &marks);
+        lit |= roots;
+        mid |= marks;
         plat_lights(btn | (ui.btn & ~(1u << B_PLAY)), lit, dimb, dim & ~lit, 1);
         plat_lights_mid(0, mid & ~lit);
     }
@@ -1426,146 +1444,400 @@ static void neon_text(int32_t cx, int32_t y, const felucca_font_t *f, const char
     cv_text(x, y, f, s, C_CYAN);
 }
 
+static void film_overlays(void);        /* (after the film: the notes' sign, the power line, the frame) */
+#include "ui_gfx.h"                      /* the finer drawing: anti-aliasing, glow, arcs */
 #include "film.c"                        /* the film: the scenes, the rain, the cuts */
 
 static void world_level(void) { eng_world(film.scene, (float)set.city / 100.0f); }
+
+/* ------------------------------------------------------------- the power cell --- */
+/* plat_battery: 0..3 bars, 4 a USB host powers it, -1 not read (the browser: none). The percent from the cell's
+ * voltage (plat_battery_raw: the bars at 531 / 561 / 591, a full cell about 615), held steady (2 points). */
+static void batt_update(uint32_t now)
+{
+    int lvl, chg, pct = -1, low;
+    int32_t raw;
+    if (now - ui.batt_at < 500u && ui.batt_at)
+        return;
+    ui.batt_at = now;
+    lvl = plat_battery();
+    chg = plat_battery_charging();
+    raw = plat_battery_raw();
+#ifdef PLAT_HOST
+    if (getenv("OFFWORLD_BATT")) {       /* the host: "5" (percent), "C" charging, "U" on USB without a cell */
+        const char *b = getenv("OFFWORLD_BATT");
+        if (b[0] == 'C') {
+            lvl = 2; chg = 2; raw = 575;
+        } else if (b[0] == 'U') {
+            lvl = 4; chg = 1; raw = 0;
+        } else {
+            lvl = atoi(b) / 34; chg = 0; raw = 515 + atoi(b);
+        }
+    }
+#endif
+    if (raw > 0) {
+        pct = (int)(raw - 515);
+        pct = pct < 0 ? 0 : pct > 100 ? 100 : pct;
+    } else if (lvl >= 0)
+        pct = lvl >= 4 ? 100 : lvl * 33;
+    if (pct >= 0 && (ui.batt_pct < 0 || pct >= ui.batt_pct + 2 || pct <= ui.batt_pct - 2 || pct == 0 || pct == 100))
+        ui.batt_pct = (int8_t)pct;
+    if (chg == 2 && ui.batt_chg != 2) {  /* plugged in: the grid comes back */
+        ui.pmsg = 2;
+        ui.pmsg_at = now;
+    }
+    ui.batt_chg = (int8_t)chg;
+    if (lvl != ui.batt_lvl)
+        ui.head_redraw = 1;
+    ui.batt_lvl = (int8_t)lvl;
+    low = lvl >= 0 && lvl < 4 && chg != 2 && ui.batt_pct >= 0 && ui.batt_pct < 15;
+    if (low && (!ui.grid_low || now - ui.pmsg_at > 60000u)) {   /* failing: said now, and every minute */
+        ui.pmsg = 1;
+        ui.pmsg_at = now;
+    }
+    ui.grid_low = (uint8_t)low;
+}
+
+/* the cell, 20 x 9 at x, y: three segments, cyan; amber at 1 bar, red and flickering nearly empty; green charging
+ * (the segments filling, over and over); on USB without a cell: green and full, a spark beside it */
+static void draw_cell(int32_t x, int32_t y, uint32_t now)
+{
+    int lvl = ui.batt_lvl, pct = ui.batt_pct, chg = ui.batt_chg == 2, usb = lvl >= 4 && !chg, n, i;
+    uint16_t col;
+    if (lvl < 0)
+        return;                          /* (not read: nothing) */
+    n = usb ? 3 : chg ? (int)((now / 400u) % 4u) : pct < 0 ? lvl : (pct + 32) / 33;
+    if (n > 3)
+        n = 3;
+    col = (chg || usb) ? RGB(120, 255, 160) : pct >= 40 ? C_CYAN : pct >= 15 ? C_AMBER : RGB(255, 60, 60);
+    if (!chg && !usb && pct < 15 && ((now / 300u) & 1u))
+        col = RGB(110, 30, 30);          /* flickering */
+    bloom((float)x + 9.0f, (float)y + 4.5f, 12.0f, c3(col), 0.18f);
+    cv_rect(x, y, 18, 1, col);
+    cv_rect(x, y + 8, 18, 1, col);
+    cv_rect(x, y, 1, 9, col);
+    cv_rect(x + 17, y, 1, 9, col);
+    cv_rect(x + 18, y + 2, 2, 5, col);
+    for (i = 0; i < 3; i++)
+        cv_rect(x + 2 + i * 5, y + 2, 4, 5, i < n ? col : RGB(40, 40, 55));
+    if (usb) {                           /* the grid's spark */
+        aa_line((float)x - 3.0f, (float)y, (float)x - 5.0f, (float)y + 4.5f, c3(col), 1.0f);
+        aa_line((float)x - 5.0f, (float)y + 4.5f, (float)x - 2.0f, (float)y + 4.5f, c3(col), 1.0f);
+        aa_line((float)x - 2.0f, (float)y + 4.5f, (float)x - 4.0f, (float)y + 9.0f, c3(col), 1.0f);
+    }
+}
+
+/* ------------------------------------------------------------- the notes' sign --- */
+/* what sounds: the keys' notes (held or staying) and the cues', lowest first, each name once */
+static uint32_t sounding_pitches(uint8_t *p, uint32_t max)
+{
+    uint32_t n = 0, k, i, j;
+    for (k = 0; k < NKEYS && n < max; k++)
+        if (ui.sounding >> k & 1u)
+            p[n++] = (uint8_t)clamp((int32_t)(ui.kp[k] + 0.5f), 0, 127);
+    for (i = 0; i < ui.cue_pn && n < max; i++)
+        p[n++] = ui.cue_pp[i];
+    for (i = 1; i < n; i++)              /* low to high */
+        for (j = i; j > 0 && p[j - 1] > p[j]; j--) {
+            uint8_t t = p[j];
+            p[j] = p[j - 1];
+            p[j - 1] = t;
+        }
+    return n;
+}
+
+/* the chord those notes make: its name ("Am", "Cmaj7", "Dsus4/A"), empty when they make none we name */
+static void chord_name(const uint8_t *p, uint32_t n, char *out)
+{
+    static const struct { uint16_t mask; const char *suf; } CH[] = {
+        {0x091, ""}, {0x089, "m"}, {0x049, "dim"}, {0x111, "aug"}, {0x085, "sus2"}, {0x0A1, "sus4"},
+        {0x491, "7"}, {0x891, "maj7"}, {0x489, "m7"}, {0x449, "m7b5"}, {0x291, "6"}, {0x289, "m6"},
+        {0x095, "add9"}, {0x08D, "madd9"}, {0x081, "5"}, {0x4A1, "7sus4"}, {0x495, "9"}, {0x48D, "m9"},
+    };
+    uint32_t set_ = 0, i, r, c;
+    out[0] = 0;
+    for (i = 0; i < n; i++)
+        set_ |= 1u << (p[i] % 12u);
+    if (n == 0 || !(set_ & (set_ - 1u)))
+        return;                          /* one note: no chord */
+    for (c = 0; c < sizeof CH / sizeof CH[0]; c++)
+        for (r = 0; r < 12u; r++) {
+            uint32_t rot = ((set_ >> r) | (set_ << (12u - r))) & 0xFFFu;
+            if (rot == CH[c].mask) {
+                text_cat(out, NOTE_NAME[r]);
+                text_cat(out, CH[c].suf);
+                if (p[0] % 12u != r) {   /* another note in the bass */
+                    text_cat(out, "/");
+                    text_cat(out, NOTE_NAME[p[0] % 12u]);
+                }
+                return;
+            }
+        }
+}
+
+/* the sign: the notes in magenta neon, the chord in cyan, the exact notes small; bottom left of the film */
+static void note_sign(void)
+{
+    uint8_t p[12];
+    uint32_t n = sounding_pitches(p, 12), i, shown = 0, prev = 99;
+    char names[40], chord[16], exact[40];
+    int32_t w;
+    if (!n)
+        return;
+    names[0] = exact[0] = 0;
+    for (i = 0; i < n; i++) {
+        uint32_t pc = p[i] % 12u;
+        char nt[6];
+        if (shown < 5u && pc != prev && !strstr(names, NOTE_NAME[pc])) {
+            if (names[0])
+                text_cat(names, " ");
+            text_cat(names, NOTE_NAME[pc]);
+            shown++;
+        }
+        prev = pc;
+        if (i < 4u) {
+            note_text(p[i], nt);
+            if (exact[0])
+                text_cat(exact, " ");
+            text_cat(exact, nt);
+        } else if (i == 4u)
+            text_cat(exact, " +");
+    }
+    chord_name(p, n, chord);
+    w = text_w(&FONT_B, names);
+    {
+        int32_t w2 = text_w(&FONT_B, chord) + (chord[0] ? 8 : 0) + text_w(&FONT_XS, exact);
+        if (w2 > w)
+            w = w2;
+    }
+    w += 14;
+    cv_rect(4, 77, w, 38, RGB(10, 4, 16));
+    cv_rect(4, 77, w, 1, RGB(90, 30, 90));
+    cv_rect(4, 114, w, 1, RGB(90, 30, 90));
+    cv_rect(4, 77, 1, 38, RGB(90, 30, 90));
+    cv_rect(3 + w, 77, 1, 38, RGB(90, 30, 90));
+    bloom(24.0f, 88.0f, 22.0f, c3(C_MAG), 0.10f);
+    text_glow(11, 79, &FONT_B, names, C_MAG, RGB(110, 20, 70));
+    if (chord[0]) {
+        text_glow(11, 96, &FONT_B, chord, C_CYAN, RGB(10, 70, 100));
+        cv_text(19 + text_w(&FONT_B, chord), 99, &FONT_XS, exact, RGB(150, 140, 170));
+    } else
+        cv_text(11, 99, &FONT_XS, exact, RGB(150, 140, 170));
+}
+
+/* over the film: the notes' sign, the power line, the frame (dark corners, neon edges) */
+static void film_overlays(void)
+{
+    uint32_t now = plat_ms(), x;
+    int32_t y;
+    note_sign();
+    if (ui.pmsg && now - ui.pmsg_at < 7000u && film.frame - film.cut_frame > 80u) {
+        const char *m = ui.pmsg == 1 ? "> GRID FAILING // CELL LOW" : "> CELL CHARGING // GRID LINKED";
+        uint32_t n = (now - ui.pmsg_at) / 40u, k;
+        char t[40];
+        for (k = 0; k < 39u && m[k] && k < n; k++)
+            t[k] = m[k];
+        t[k] = 0;
+        if (k) {
+            cv_rect(3, 19, text_w(&FONT_XS, t) + 12, 14, ui.pmsg == 1 ? RGB(22, 4, 6) : RGB(4, 16, 10));
+            text_glow(9, 20, &FONT_XS, t, ui.pmsg == 1 ? C_AMBER : RGB(120, 255, 160),
+                      ui.pmsg == 1 ? RGB(90, 30, 10) : RGB(10, 70, 40));
+        }
+    }
+    for (y = 0; y < 120; y++) {          /* the corners darker: an old screen's glass */
+        int32_t e = y < 10 ? 10 - y : y > 109 ? y - 109 : 0;
+        for (x = 0; x < 7u; x++) {
+            float a = (float)(7u - x) * 0.07f + (float)e * 0.04f;
+            px_blend((int32_t)x, y, rgb3(0, 0, 0), a > 0.6f ? 0.6f : a);
+            px_blend(239 - (int32_t)x, y, rgb3(0, 0, 0), a > 0.6f ? 0.6f : a);
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ the head --- */
+static void head_chip(int32_t x, const char *s, int on)
+{
+    uint16_t c = on ? C_AMBER : RGB(70, 60, 80);
+    cv_rect(x + 1, 6, 21, 12, on ? RGB(40, 24, 8) : RGB(12, 10, 18));
+    cv_rect(x + 1, 6, 21, 1, c);
+    cv_rect(x + 1, 17, 21, 1, c);
+    cv_rect(x, 7, 1, 10, c);
+    cv_rect(x + 22, 7, 1, 10, c);
+    cv_text(x + 3, 6, &FONT_XS, s, c);
+}
 
 static void draw_head(void)
 {
     char t[8];
     int lit = !(film.flicker && (film.frame & 4u));
-    int32_t x = 6;
+    int32_t y;
     cv_begin(240, 24, C_BLACK);
-    cv_text(x + 1, 5, &FONT_B, "OFF", RGB(120, 20, 90));
-    cv_text(x, 4, &FONT_B, "OFF", C_CYAN);
-    x += text_w(&FONT_B, "OFF");
-    cv_text(x + 1, 5, &FONT_B, "WORLD", lit ? RGB(120, 20, 90) : C_BLACK);
-    cv_text(x, 4, &FONT_B, "WORLD", lit ? C_CYAN : RGB(30, 50, 70));
-    cv_text(100, 7, &FONT_XS, "DRONE", ui.drone ? C_AMBER : RGB(60, 50, 50));
-    cv_text(136, 7, &FONT_XS, "LOW", ui.lowhold ? C_AMBER : RGB(60, 50, 50));
-    cv_text(160, 7, &FONT_XS, "EPIC", set.epic ? C_MAG : RGB(60, 40, 55));
-    t[0] = 'O';
-    t[1] = 'C';
-    t[2] = 'T';
-    signed_text(set.octave, t + 3);
-    cv_text(236 - text_w(&FONT_XS, t), 7, &FONT_XS, t, RGB(150, 150, 170));
-    cv_rect(0, 23, 240, 1, RGB(60, 20, 60));
+    for (y = 0; y < 24; y++)             /* dark glass */
+        cv_rect(0, y, 240, 1, RGB(6 + y / 2, 4 + y / 5, 16 + (y * 7) / 10));
+    bloom(40.0f, 12.0f, 38.0f, c3(C_CYAN), 0.07f);
+    text_glow(7, 4, &FONT_B, "OFF", C_CYAN, RGB(10, 60, 110));
+    if (lit)
+        text_glow(7 + text_w(&FONT_B, "OFF"), 4, &FONT_B, "WORLD", C_CYAN, RGB(10, 60, 110));
+    else
+        cv_text(7 + text_w(&FONT_B, "OFF"), 4, &FONT_B, "WORLD", RGB(30, 50, 70));
+    head_chip(100, "DRN", ui.drone);
+    head_chip(126, "LOW", ui.lowhold);
+    head_chip(152, "EPC", set.epic);
+    signed_text(set.octave, t);
+    cv_text(180, 6, &FONT_XS, t, RGB(150, 150, 170));
+    draw_cell(212, 7, plat_ms());
+    cv_rect(0, 23, 240, 1, RGB(70, 20, 70));
+    cv_rect(0, 23, 60, 1, C_CYAN);
     cv_blit(0, 0);
 }
 
-static void draw_knob(int k, int32_t x, int32_t y, uint32_t now)
+/* ------------------------------------------------------------------ the panel --- */
+/* a knob: a ring (270 degrees), lit to its value, cyan on a sweetspot, magenta between; its name, its value beside */
+static void dial(int32_t i, float frac, int on, int hot, const char *name, const char *val, const macro_t *mc)
 {
-    const macro_t *mc = &MACROS[k];
-    int32_t v = KM[k], w = 54, z = zone_at(mc, v), zn = zone_near(mc, v), fill = (v * (w - 2)) / 127;
-    uint32_t i;
-    int hot = ui.knob_at[k] && now - ui.knob_at[k] < 600u;
-    char t[8];
-    cv_text(x, y, &FONT_XS, mc->name, hot ? C_WHITE : RGB(140, 140, 160));
-    int_text(v, t);
-    cv_text(x + w - text_w(&FONT_XS, t), y, &FONT_XS, t, hot ? C_CYAN : C_AMBER);
-    cv_rect(x, y + 14, w, 8, RGB(50, 30, 60));
-    cv_rect(x + 1, y + 15, w - 2, 6, C_BLACK);
-    cv_rect(x + 1, y + 15, fill, 6, z >= 0 ? C_CYAN : C_MAG);
-    for (i = 0; i < mc->nzones; i++) {
-        int32_t tx = x + 1 + (mc->centre[i] * (w - 3)) / 127;
-        cv_rect(tx, y + 11, 1, 3, (int)i == z ? C_CYAN : RGB(110, 90, 120));
-    }
-    ctext(x + w / 2, y + 26, &FONT_XS, mc->zone[z >= 0 ? z : zn], z >= 0 ? C_WHITE : RGB(90, 80, 100));
+    float cx = 14.0f + (float)i * 60.0f, cy = 36.0f, a0 = -135.0f, a1 = 135.0f, av = a0 + (a1 - a0) * frac;
+    uint16_t c = on ? C_CYAN : C_MAG;
+    uint32_t z;
+    ring_arc(cx, cy, 8.5f, 3.0f, a0, a1, rgb3(45, 30, 60), 1.0f, 0.0f);
+    if (frac > 0.005f)
+        ring_arc(cx, cy, 8.5f, 3.0f, a0, av, c3(c), 1.0f, hot ? 3.0f : 2.0f);
+    if (mc)
+        for (z = 0; z < mc->nzones; z++) {   /* the sweetspots: points outside the ring */
+            float an = (a0 + (a1 - a0) * (float)mc->centre[z] / 127.0f) * 0.017453f;
+            px_blend((int32_t)(cx + 13.0f * fm_sin_turns(an / FM_TWO_PI)),
+                     (int32_t)(cy - 13.0f * fm_sin_turns(0.25f - an / FM_TWO_PI)), c3(RGB(140, 120, 160)), 1.0f);
+        }
+    cv_text((int32_t)cx + 13, 22, &FONT_XS, name, hot ? C_WHITE : RGB(150, 140, 170));
+    cv_text((int32_t)cx + 13, 34, &FONT_XS, val, on ? C_CYAN : hot ? C_WHITE : C_AMBER);
 }
 
-static void draw_pknob(int k, int32_t x, int32_t y, uint32_t now)   /* a page's knob: its name, its value */
+/* the keyboard: the FM-1's 27 keys small; what sounds lit cyan, the low split amber, with FOLLOW the scale marked
+ * (amber points, the root's magenta) and on a key that plays another note than its own, that note written on it */
+#define KB_Y 57
+static void draw_keyboard(void)
 {
-    int32_t lo, hi, v = pk_get(ui.page, k), w = 54;
-    int hot = ui.knob_at[k] && now - ui.knob_at[k] < 600u;
-    char t[16];
-    pk_range(ui.page, k, &lo, &hi);
-    cv_text(x, y, &FONT_XS, PK_NAME[ui.page - 1][k], hot ? C_WHITE : RGB(140, 140, 160));
-    cv_rect(x, y + 14, w, 8, RGB(50, 30, 60));
-    cv_rect(x + 1, y + 15, w - 2, 6, C_BLACK);
-    cv_rect(x + 1, y + 15, (v - lo) * (w - 2) / (hi - lo > 0 ? hi - lo : 1), 6, hot ? C_CYAN : C_MAG);
-    pk_text(ui.page, k, t);
-    ctext(x + w / 2, y + 26, &FONT_XS, t, hot ? C_CYAN : C_AMBER);
+    static const uint8_t WKK[16] = PLAT_WHITE_KEYS, BKK[11] = PLAT_BLACK_KEYS;
+    uint32_t i, roots, marks, on = ui.sounding | ui.keys, left = side_mask(SIDE_L);
+    int white_mode = split_on() && set.follow == FOLLOW_WHITE;
+    scale_marks(&roots, &marks);
+    for (i = 0; i < 16u; i++) {
+        uint32_t k = WKK[i];
+        int32_t x = (int32_t)i * 15;
+        uint16_t c = (left >> k & 1u) ? RGB(44, 30, 16) : RGB(26, 22, 34);
+        if (on >> k & 1u)
+            c = RGB(30, 150, 170);
+        cv_rect(x + 1, KB_Y, 13, 38, c);
+        cv_rect(x, KB_Y, 1, 38, RGB(60, 50, 74));
+        if (on >> k & 1u)
+            bloom((float)x + 7.5f, (float)KB_Y + 26.0f, 10.0f, c3(C_CYAN), 0.18f);
+        if (roots >> k & 1u)
+            cv_rect(x + 5, KB_Y + 33, 5, 3, C_MAG);
+        else if (marks >> k & 1u)
+            cv_rect(x + 6, KB_Y + 34, 3, 2, C_AMBER);
+        if (follows(k) && (on >> k & 1u) && ui.kp[k] != (float)(53 + (int32_t)k + 12 * set.octave)) {
+            const char *nm = NOTE_NAME[((int32_t)(ui.kp[k] + 0.5f)) % 12];
+            cv_text(x + 8 - text_w(&FONT_XS, nm) / 2, KB_Y + 18, &FONT_XS, nm, RGB(4, 20, 26));
+        }
+    }
+    cv_rect(239, KB_Y, 1, 38, RGB(60, 50, 74));
+    for (i = 0; i < 11u; i++) {
+        uint32_t k = BKK[i], w = 0, j;
+        int32_t x;
+        uint16_t c = (left >> k & 1u) ? RGB(30, 18, 8) : RGB(8, 6, 12);
+        for (j = 0; j < 16u; j++)
+            if (WKK[j] < k)
+                w = j;
+        x = (int32_t)(w + 1u) * 15 - 4;
+        if (white_mode && k >= set.split_key)
+            c = RGB(14, 12, 18);         /* resting in WHITE */
+        if (on >> k & 1u)
+            c = RGB(30, 150, 170);
+        cv_rect(x, KB_Y, 9, 22, c);
+        cv_rect(x, KB_Y + 21, 9, 1, RGB(60, 50, 74));
+        if ((marks >> k & 1u) && !white_mode)
+            cv_rect(x + 3, KB_Y + 16, 3, 2, C_AMBER);
+        if (roots >> k & 1u)
+            cv_rect(x + 2, KB_Y + 15, 5, 3, C_MAG);
+        if (follows(k) && (on >> k & 1u) && ui.kp[k] != (float)(53 + (int32_t)k + 12 * set.octave)) {
+            const char *nm = NOTE_NAME[((int32_t)(ui.kp[k] + 0.5f)) % 12];
+            cv_text(x + 5 - text_w(&FONT_XS, nm) / 2, KB_Y + 3, &FONT_XS, nm, RGB(4, 20, 26));
+        }
+    }
+}
+
+static void draw_cues(void)              /* the CUES page: the eight cues, big, where the keyboard was */
+{
+    uint32_t c;
+    char n[4];
+    for (c = 0; c < NCUE; c++) {
+        int32_t x = 3 + (int32_t)c * 29;
+        uint16_t col = ui.cue_cur == c + 1u ? C_CYAN : set.cue_n[c] ? C_AMBER : RGB(40, 30, 50);
+        if (ui.cue_sel == c + 1u)
+            cv_rect(x - 1, KB_Y + 3, 28, 34, C_WHITE);
+        cv_rect(x, KB_Y + 4, 26, 32, col);
+        cv_rect(x + 1, KB_Y + 5, 24, 30, RGB(8, 6, 14));
+        if (ui.cue_cur == c + 1u)
+            bloom((float)x + 13.0f, (float)KB_Y + 20.0f, 16.0f, c3(C_CYAN), 0.2f);
+        n[0] = (char)('1' + c);
+        n[1] = 0;
+        cv_text(x + 9, KB_Y + 8, &FONT_B, n, col);
+        if (set.cue_n[c])
+            cv_rect(x + 13 - (int32_t)set.cue_n[c] * 2, KB_Y + 28, (int32_t)set.cue_n[c] * 4, 3, col);
+    }
 }
 
 static void draw_panel(void)
 {
     uint32_t now = plat_ms(), i;
-    char t[40], n[8];
+    int32_t y;
+    char t[40];
+    static const char *const MODE[NPAGE] = {"MAIN", "SPLIT", "PRESS", "GLIDE", "WORLD", "CUES"};
     cv_begin(240, 96, C_BLACK);
-    cv_rect(0, 0, 240, 1, RGB(60, 20, 60));
+    for (y = 0; y < 96; y++)
+        cv_rect(0, y, 240, 1, RGB(4 + y / 16, 3, 10 + y / 12));
+    cv_rect(0, 0, 240, 1, RGB(70, 20, 70));
+    cv_rect(180, 0, 60, 1, C_CYAN);
     if (now < ui.msg_until) {
-        int32_t x = cv_text(6, 5, &FONT_B, ui.msg[0], C_WHITE);
-        cv_text(x + 8, 5, &FONT_B, ui.msg[1], C_CYAN);
-    } else if (ui.page != PG_MAIN) {
-        cv_text(6, 5, &FONT_B, "//", C_MAG);
-        cv_text(28, 5, &FONT_B, PAGE_NAME[ui.page], C_AMBER);
+        int32_t x = cv_text(6, 4, &FONT_B, ui.msg[0], C_WHITE);
+        text_glow(x + 8, 4, &FONT_B, ui.msg[1], C_CYAN, RGB(10, 60, 100));
     } else {
-        t[0] = '>';
-        t[1] = ' ';
-        t[2] = (char)('1' + set.preset);
-        t[3] = ' ';
-        t[4] = 0;
-        cv_text(6, 5, &FONT_B, t, C_MAG);
-        cv_text(6 + text_w(&FONT_B, t), 5, &FONT_B, PR.name, C_AMBER);
+        t[0] = '0' + (char)((set.preset + 1) / 10);
+        t[1] = (char)('0' + (set.preset + 1) % 10);
+        t[2] = 0;
+        cv_rect(5, 4, 21, 15, C_MAG);
+        cv_text(9, 5, &FONT_XS, t, RGB(20, 0, 15));
+        text_glow(31, 3, &FONT_B, PR.name, C_AMBER, RGB(90, 40, 10));
+        cv_text(234 - text_w(&FONT_XS, MODE[ui.page]), 5, &FONT_XS, MODE[ui.page], RGB(110, 90, 130));
     }
-    if (ui.page == PG_MAIN && now < ui.zone_until && ui.zone_k >= 0) {
+    if (ui.page == PG_MAIN && now < ui.zone_until && ui.zone_k >= 0) {   /* a sweetspot reached: its name, big */
         const macro_t *mc = &MACROS[ui.zone_k];
-        ctext(120, 28, &FONT_XS, mc->name, RGB(140, 140, 160));
-        ctext(120, 42, &FONT_M, mc->zone[ui.zone_z], C_CYAN);
-        cv_rect(60, 70, 120, 1, C_MAG);
-    } else {
+        cv_text(6, 30, &FONT_XS, mc->name, RGB(140, 140, 160));
+        text_glow(120 - text_w(&FONT_M, mc->zone[ui.zone_z]) / 2, 25, &FONT_M, mc->zone[ui.zone_z], C_CYAN, RGB(10, 60, 100));
+    } else
         for (i = 0; i < 4u; i++) {
-            if (ui.page == PG_MAIN)
-                draw_knob((int)i, 4 + (int32_t)i * 59, 28, now);
-            else
-                draw_pknob((int)i, 4 + (int32_t)i * 59, 28, now);
+            int hot = ui.knob_at[i] && now - ui.knob_at[i] < 600u;
+            if (ui.page == PG_MAIN) {
+                const macro_t *mc = &MACROS[i];
+                int32_t v = KM[i];
+                int_text(v, t);
+                dial((int32_t)i, (float)v / 127.0f, zone_at(mc, v) >= 0, hot, mc->name, t, mc);
+            } else {
+                int32_t lo, hi, v = pk_get(ui.page, (int)i);
+                char nm[12];
+                uint32_t j;
+                pk_range(ui.page, (int)i, &lo, &hi);
+                pk_text(ui.page, (int)i, t);
+                t[7] = 0;                /* (what fits beside the ring) */
+                for (j = 0; j < 7u && PK_NAME[ui.page - 1][i][j]; j++)
+                    nm[j] = PK_NAME[ui.page - 1][i][j];
+                nm[j] = 0;
+                dial((int32_t)i, (float)(v - lo) / (float)(hi - lo > 0 ? hi - lo : 1), hot, hot, nm, t, 0);
+            }
         }
-    }
-    t[0] = 0;
-    if (split_on() && set.follow != FOLLOW_OFF) {   /* the melody's key */
-        text_cat(t, NOTE_NAME[ui.root]);
-        text_cat(t, " ");
-        text_cat(t, SCALES[set.scale].name);
-        text_cat(t, "  ");
-    } else {
-        text_cat(t, "VOICES ");
-        int_text(eng_voices(), n);
-        text_cat(t, n);
-        text_cat(t, "/8  ");
-    }
-    text_cat(t, "CPU ");
-    int_text((int32_t)plat_cpu_pct(), n);
-    text_cat(t, n);
-    text_cat(t, "% XR ");                /* xruns: blocks the sound came late (a click each) */
-    int_text((int32_t)plat_xruns(), n);
-    text_cat(t, n);
-    if (ui.page == PG_CUES) {            /* the eight cues: kept (amber), picked (frame), sounding (cyan) */
-        uint32_t c;
-        for (c = 0; c < NCUE; c++) {
-            int32_t x = 6 + (int32_t)c * 29;
-            uint16_t col = ui.cue_cur == c + 1u ? C_CYAN : set.cue_n[c] ? C_AMBER : RGB(40, 30, 50);
-            if (ui.cue_sel == c + 1u)
-                cv_rect(x - 1, 77, 26, 16, C_WHITE);
-            cv_rect(x, 78, 24, 14, col);
-            cv_rect(x + 1, 79, 22, 12, C_BLACK);
-            n[0] = (char)('1' + c);
-            n[1] = 0;
-            cv_text(x + 3, 80, &FONT_XS, n, col);
-            if (set.cue_n[c])
-                cv_rect(x + 12, 84, (int32_t)set.cue_n[c] * 2, 3, col);
-        }
-        cv_blit(0, 144);
-        return;
-    }
-    cv_text(6, 80, &FONT_XS, t, RGB(40, 140, 150));
-    if (set.press != PRESS_OFF) {        /* the pressure: the hardest-pressed key */
-        uint32_t k, pmax = 0;
-        for (k = 0; k < NKEYS; k++)
-            if (ui.prs[k] > pmax)
-                pmax = ui.prs[k];
-        cv_rect(200, 82, 34, 6, RGB(50, 30, 60));
-        cv_rect(201, 83, (int32_t)(pmax * 32u / 127u), 4, C_MAG);
-    }
+    if (ui.page == PG_CUES)
+        draw_cues();
+    else
+        draw_keyboard();
     cv_blit(0, 144);
 }
 
@@ -1630,6 +1902,23 @@ static void draw_sheet(void)
         cv_rect(x, 64, 7, 22, is_white(i) ? c : mix565(c, C_BLACK, 120));
     }
     cv_text(4, 86, &FONT_XS, split_on() ? "LOW SPLIT" : "KEYS", C_AMBER);
+    {
+        char t[40], n[8];
+        t[0] = 0;
+        text_cat(t, "CPU ");
+        int_text((int32_t)plat_cpu_pct(), n);
+        text_cat(t, n);
+        text_cat(t, "% XR ");
+        int_text((int32_t)plat_xruns(), n);
+        text_cat(t, n);
+        if (ui.batt_pct >= 0) {
+            text_cat(t, " CELL ");
+            int_text(ui.batt_pct, n);
+            text_cat(t, n);
+            text_cat(t, "%");
+        }
+        cv_text(236 - text_w(&FONT_XS, t), 86, &FONT_XS, t, RGB(40, 140, 150));
+    }
     cv_blit(0, 144);
 }
 
@@ -1802,6 +2091,7 @@ void app_ui_init(void)
     touch_on(1);
     lcd_fill(0, 0, 240, 240, C_BLACK);
     ui.rnd = 0x51ED270Bu;
+    ui.batt_lvl = ui.batt_pct = ui.batt_chg = -1;
     film_init();
     ui.zone_k = -1;
     ui.redraw = ui.head_redraw = 1;
@@ -1880,6 +2170,9 @@ void app_frame(void)
         ui.redraw = 1;
     }
     cue_tick(now);
+    batt_update(now);
+    if ((ui.batt_chg == 2 || ui.grid_low) && (now / 150u) != (ui.batt_at / 150u))
+        ui.head_redraw = 1;
     if ((now & 511u) < 20u)
         weather();
     if (ui.sheet) {                      /* the controls, drawn (a few times a second: what is on, live) */

@@ -113,6 +113,13 @@ Settings, presets and cues save themselves. Because the FM-1 stops its sound for
 flash, OFFWORLD waits for a quiet moment (no note, no cue, no MEMORY). Switching off during a long drone loses the
 last change.
 
+## 12. Notes, keyboard and battery on the screen
+
+- **The notes' sign:** bottom left of the film: the notes that sound ("A C E"), the chord ("Am"), the exact notes small.
+- **The keyboard:** the FM-1's 27 keys at the bottom. What sounds is lit cyan, the low split amber. With FOLLOW, points mark the scale (amber) and the root (magenta); a key that plays another note than its own has that note written on it.
+- **The power cell:** top right, three segments. Nearly empty it turns red and flickers, the city's power fails (lights go out, the picture dims) and the terminal says "GRID FAILING". Charging, it fills green. On USB without a cell: a spark.
+- CPU, XR and the battery's percent are on the controls page (HOME twice).
+
 ---
 
 OFFWORLD by swtdr34mz · MPL-2.0 · Built on fm1-base (Charles Vestal) and felucca-bsp (Leo Kuroshita, Hügelton

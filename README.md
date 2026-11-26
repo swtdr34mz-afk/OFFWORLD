@@ -15,6 +15,14 @@ slowly and it stops for a few detents on each one, whose name lights up.
 
 **Install:** download the `.fwsc` from [Releases](https://github.com/swtdr34mz-afk/OFFWORLD/releases) and install it as any FM-1 firmware. Unofficial: not made or supported by M-VAVE; at your own risk.
 
+## Version 0.5: a facelift, the notes shown, the power cell
+
+- A finer look: a glass head with the title in neon and status chips (DRN, LOW, EPC), ring dials with their sweetspots, the film framed like an old screen.
+- **The notes shown**: a neon sign in the film names what sounds ("A C E") and the chord ("Am", "Dsus4/A"), with the exact notes small.
+- **The keyboard on the screen**: the FM-1's 27 keys, what sounds lit, the low split amber; with FOLLOW the scale's keys marked (the root magenta), and on a key that plays another note than its own, that note written on it.
+- **The power cell**: the battery in the head, three neon segments; nearly empty it turns red and flickers, the city's power fails (lights go out, the picture dims) and the terminal says so; charging it fills green and the grid comes back; on USB without a cell, a spark.
+- CPU, XR and the cell's percent are on the controls page (HOME twice).
+
 ## Version 0.4.1: no clicks, a new intro
 
 - Settings are written to the flash only in a quiet moment (no note, no cue, no MEMORY), faded out first: a write stops the FM-1's sound for a moment, which was the click a few seconds after changing a preset or a knob.

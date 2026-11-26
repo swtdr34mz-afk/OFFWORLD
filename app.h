@@ -13,6 +13,7 @@
 #define APP_BLOCK 256u                   /* frames per audio block: 5.8 ms at 44.1 kHz (a drone: no hurry) */
 #define APP_OVERLOAD                     /* app_overload: the render over 90 % of its time: a voice let go */
 #define APP_TOUCH                        /* velocity from the keys (lib/touch.h): harder = brighter brass */
+#define APP_BATTERY_RAW                  /* plat_battery_raw, plat_battery_charging: the power cell on the screen */
 
 /* the store: the app's settings and the panel calibration (the platform's) */
 enum { OBJ_SETTINGS, OBJ_PANEL, OBJ_NOBJ };

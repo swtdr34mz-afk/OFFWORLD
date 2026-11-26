@@ -67,7 +67,8 @@ static uint32_t hsh(uint32_t a, uint32_t b)
     return x;
 }
 
-static uint32_t lit(uint32_t h) { return ui.win[h % NKEYS]; }   /* a light's key: how lit it is, 0..255 */
+/* a light's key: how lit it is, 0..255. The cell nearly empty: two lights in three fail (the city's power going) */
+static uint32_t lit(uint32_t h) { return ui.grid_low && (h >> 5) % 3u ? 0u : ui.win[h % NKEYS]; }
 static float lvl01(void) { return fm_clampf(eng_level() * 1.6f, 0.0f, 1.0f); }
 
 /* ------------------------------------------------------------------ helpers --- */
@@ -793,11 +794,12 @@ static void film_frame(uint32_t now)
         for (k = 0; k < 31u && SCENE_NAME[film.scene][k] && k < n; k++)
             t[k] = SCENE_NAME[film.scene][k];
         t[k] = 0;
-        if (k) {
-            cv_rect(2, 2, text_w(&FONT_XS, t) + 8, 14, RGB(4, 4, 10));
-            cv_text(5, 3, &FONT_XS, t, C_CYAN);
+        if (k) {                         /* a tag: dark glass, a magenta edge */
+            cv_rect(3, 3, text_w(&FONT_XS, t) + 12, 14, RGB(4, 4, 12));
+            cv_rect(3, 3, 2, 14, C_MAG);
+            cv_text(9, 4, &FONT_XS, t, C_CYAN);
             if ((film.frame & 4u) || since > 70u)
-                cv_rect(5 + text_w(&FONT_XS, t), 4, 5, 10, C_CYAN);
+                cv_rect(9 + text_w(&FONT_XS, t), 5, 5, 10, C_CYAN);
         }
     }
     if (film.log >= 0 && since >= 40u && since < 190u) {   /* the log line, typed after the place */
@@ -807,8 +809,8 @@ static void film_frame(uint32_t now)
             t[k] = LOGS[film.log][k];
         t[k] = 0;
         if (k) {
-            cv_rect(2, 17, text_w(&FONT_XS, t) + 8, 14, RGB(4, 4, 10));
-            cv_text(5, 18, &FONT_XS, t, C_AMBER);
+            cv_rect(3, 19, text_w(&FONT_XS, t) + 12, 14, RGB(4, 4, 12));
+            cv_text(9, 20, &FONT_XS, t, C_AMBER);
         }
     }
     if (set.story) {                     /* the night's clock */
@@ -820,9 +822,13 @@ static void film_frame(uint32_t now)
         t[3] = (char)('0' + mi / 10);
         t[4] = (char)('0' + mi % 10);
         t[5] = 0;
-        cv_rect(203, 2, 35, 14, RGB(4, 4, 10));
-        cv_text(206, 3, &FONT_XS, t, mn > 600 ? C_AMBER : C_MAG);
+        cv_rect(192, 3, 45, 14, RGB(4, 4, 12));
+        cv_text(200, 4, &FONT_XS, t, mn > 600 ? C_AMBER : C_MAG);
     }
+    film_overlays();                     /* the notes' sign, the power line, the frame */
+    if (ui.grid_low)                     /* the power failing: the whole picture dimmer */
+        for (y = (int32_t)(film.frame & 1u) + 2; y < 120; y += 2)
+            px_dim_row(y);
     for (y = (int32_t)(film.frame & 3u); y < 120; y += 4)   /* scanlines, rolling slowly */
         px_dim_row(y);
     for (i = 0; i < 40u; i++)            /* grain */
