@@ -1463,6 +1463,9 @@ static void batt_update(uint32_t now)
     lvl = plat_battery();
     chg = plat_battery_charging();
     raw = plat_battery_raw();
+#ifdef __EMSCRIPTEN__
+    lvl = 3; chg = 0; raw = 620;         /* the browser has no cell: shown full (as the simulator), so it is seen */
+#endif
 #ifdef PLAT_HOST
     if (getenv("OFFWORLD_BATT")) {       /* the host: "5" (percent), "C" charging, "U" on USB without a cell */
         const char *b = getenv("OFFWORLD_BATT");
